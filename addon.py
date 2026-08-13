@@ -6,6 +6,7 @@ import mathutils
 import json
 import threading
 import socket
+import queue
 import time
 import requests
 import tempfile
@@ -320,6 +321,15 @@ class BlenderMCPServer:
         self.running = False
         self.socket = None
         self.server_thread = None
+        # Commands are pushed here by client threads and drained by a single
+        # timer running on Blender's main thread. bpy.app.timers is not
+        # thread-safe, so registering a timer per command (the previous
+        # approach) could silently drop the callback - on Windows especially -
+        # leaving the client blocked in recv() until its socket timeout.
+        self.command_queue = queue.Queue()
+        # Live client sockets, so stop() can unblock threads parked in recv().
+        self._clients = set()
+        self._clients_lock = threading.Lock()
 
     def _get_config_value(self, scene_attr, pref_attr=None, env_var=None):
         """Read config in order: addon preferences -> scene -> env var."""
@@ -396,7 +406,10 @@ class BlenderMCPServer:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.socket.bind((self.host, self.port))
-            self.socket.listen(1)
+            # Backlog of 1 meant a reconnecting client could complete the TCP
+            # handshake and then never be accept()ed - a connection that looks
+            # established but is never serviced.
+            self.socket.listen(5)
 
             # Start server thread
             self.server_thread = threading.Thread(target=self._server_loop)
@@ -404,6 +417,11 @@ class BlenderMCPServer:
             self.server_thread.start()
 
             _register_edit_capture_handlers()
+
+            # start() is called from the operator, i.e. the main thread, so
+            # this is the only safe place to touch bpy.app.timers.
+            if not bpy.app.timers.is_registered(self._drain_command_queue):
+                bpy.app.timers.register(self._drain_command_queue, persistent=True)
 
             print(f"BlenderMCP server started on {self.host}:{self.port}")
         except Exception as e:
@@ -416,6 +434,12 @@ class BlenderMCPServer:
         _unregister_edit_capture_handlers()
         get_edit_recorder().drain()
 
+        try:
+            if bpy.app.timers.is_registered(self._drain_command_queue):
+                bpy.app.timers.unregister(self._drain_command_queue)
+        except Exception:
+            pass
+
         # Close socket
         if self.socket:
             try:
@@ -423,6 +447,30 @@ class BlenderMCPServer:
             except:
                 pass
             self.socket = None
+
+        # Shut down live client sockets. Without this, handler threads stay
+        # parked in a blocking recv() forever; being daemon threads they then
+        # outlive the restart and close connections the new server owns
+        # (the WinError 10054 seen after toggling the addon).
+        with self._clients_lock:
+            clients = list(self._clients)
+            self._clients.clear()
+        for client in clients:
+            try:
+                client.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                client.close()
+            except Exception:
+                pass
+
+        # Drop any commands that will never be serviced now.
+        while True:
+            try:
+                self.command_queue.get_nowait()
+            except queue.Empty:
+                break
 
         # Wait for thread to finish
         if self.server_thread:
@@ -468,10 +516,44 @@ class BlenderMCPServer:
 
         print("Server thread stopped")
 
+    def _drain_command_queue(self):
+        """Run queued commands on Blender's main thread.
+
+        Registered once by start(); returns the poll interval so Blender keeps
+        calling it. All bpy access happens here, on the main thread.
+        """
+        if not self.running:
+            return None
+
+        while True:
+            try:
+                command, client = self.command_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            try:
+                response = self.execute_command(command)
+                response_json = json.dumps(response)
+            except Exception as e:
+                print(f"Error executing command: {str(e)}")
+                traceback.print_exc()
+                response_json = json.dumps({"status": "error", "message": str(e)})
+
+            try:
+                client.sendall(response_json.encode('utf-8'))
+            except Exception:
+                print("Failed to send response - client disconnected")
+
+        return 0.05
+
     def _handle_client(self, client):
         """Handle connected client"""
         print("Client handler started")
-        client.settimeout(None)  # No timeout
+        # A finite timeout keeps this loop responsive to self.running instead
+        # of parking in recv() forever.
+        client.settimeout(1.0)
+        with self._clients_lock:
+            self._clients.add(client)
         buffer = b''
 
         try:
@@ -489,39 +571,25 @@ class BlenderMCPServer:
                         command = json.loads(buffer.decode('utf-8'))
                         buffer = b''
 
-                        # Execute command in Blender's main thread
-                        def execute_wrapper():
-                            try:
-                                response = self.execute_command(command)
-                                response_json = json.dumps(response)
-                                try:
-                                    client.sendall(response_json.encode('utf-8'))
-                                except:
-                                    print("Failed to send response - client disconnected")
-                            except Exception as e:
-                                print(f"Error executing command: {str(e)}")
-                                traceback.print_exc()
-                                try:
-                                    error_response = {
-                                        "status": "error",
-                                        "message": str(e)
-                                    }
-                                    client.sendall(json.dumps(error_response).encode('utf-8'))
-                                except:
-                                    pass
-                            return None
-
-                        # Schedule execution in main thread
-                        bpy.app.timers.register(execute_wrapper, first_interval=0.0)
+                        # Hand off to the main thread. Never call
+                        # bpy.app.timers.register() from here - it is not
+                        # thread-safe and the callback can be silently lost.
+                        print(f"Queued command: {command.get('type')}")
+                        self.command_queue.put((command, client))
                     except json.JSONDecodeError:
                         # Incomplete data, wait for more
                         pass
+                except socket.timeout:
+                    # Expected; loop round and re-check self.running.
+                    continue
                 except Exception as e:
                     print(f"Error receiving data: {str(e)}")
                     break
         except Exception as e:
             print(f"Error in client handler: {str(e)}")
         finally:
+            with self._clients_lock:
+                self._clients.discard(client)
             try:
                 client.close()
             except:
@@ -543,6 +611,11 @@ class BlenderMCPServer:
         """Internal command execution with proper context"""
         cmd_type = command.get("type")
         params = command.get("params", {})
+
+        # Trivial liveness check. Touches no bpy data, so a successful ping
+        # alongside a failing command isolates data access from transport.
+        if cmd_type == "ping":
+            return {"status": "success", "result": {"pong": True}}
 
         # Add a handler for checking PolyHaven status
         if cmd_type == "get_polyhaven_status":
