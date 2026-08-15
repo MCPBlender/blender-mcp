@@ -37,8 +37,15 @@ For the current version and changelog, see the [releases page](https://github.co
 
 ### Installing a new version (existing users)
 - For newcomers, you can go straight to Installation. For existing users, see the points below
-- Download the latest addon.py file and replace the older one, then add it to Blender
-- Delete the MCP server from Claude and add it back again, and you should be good to go!
+- Update the addon file by running:
+```bash
+uvx blender-mcp install-addon
+uvx blender-mcp addon-paths   # optional: list detected Blender addons folders
+```
+- Then in Blender: Preferences → Add-ons → disable and re-enable **Interface: Blender MCP** (or restart Blender), and click **Start MCP Server** again
+- Delete the MCP server from Claude and add it back again if the server package itself needs a refresh
+
+> **Note:** the MCP server never modifies your Blender addon files on its own. When it starts, it checks whether the installed addon is behind the bundled copy and logs how to update; `install-addon` is what actually writes, and it keeps a `.bak` of the file it replaces. Trajectory capture still works on older loaded addons via an `execute_code` fallback.
 
 
 ## Features
@@ -234,11 +241,18 @@ _Prerequisites_: Make sure you have [Visual Studio Code](https://code.visualstud
 
 ### Installing the Blender Addon
 
-1. Download the `addon.py` file from this repo
-1. Open Blender
-2. Go to Edit > Preferences > Add-ons
-3. Click "Install..." and select the `addon.py` file
-4. Enable the addon by checking the box next to "Interface: Blender MCP"
+1. **Recommended:** from a terminal run:
+```bash
+uvx blender-mcp install-addon
+```
+   This copies the addon into your Blender addons folder as `blender_mcp.py`. It prints where it wrote to, and keeps a `.bak` of any file it replaces.
+   (Optional: `uvx blender-mcp addon-paths` lists detected Blender addons folders. Override the destination with `BLENDERMCP_ADDONS_DIR=/path/to/scripts/addons`.)
+2. Open Blender
+3. Go to Edit > Preferences > Add-ons
+4. Enable **Interface: Blender MCP** (search “Blender MCP”). If it doesn’t appear yet, click Install… and select the copied `blender_mcp.py` / `addon.py`, or restart Blender.
+5. **Manual alternative** (if the command above can't find your Blender install, or you prefer doing it by hand): download `addon.py` from this repo → in Blender, Edit > Preferences > Add-ons > Install… → select the downloaded `addon.py` → enable it.
+
+Then open the **BlenderMCP** tab in Blender's sidebar (press `N` in the 3D viewport) and click **Start MCP Server**. See [Starting the Connection](#starting-the-connection) below.
 
 
 ## Usage
@@ -333,11 +347,10 @@ The system uses a simple JSON-based protocol over TCP sockets:
 
 #### Telemetry Control
 
-BlenderMCP collects anonymous usage data to help improve the tool. You can control telemetry in two ways:
+BlenderMCP collects anonymous usage data to help improve the tool. Telemetry consent is **on by default**, and you can turn it off in two ways:
 
 1. **In Blender**: Go to Edit > Preferences > Add-ons > Blender MCP and uncheck the telemetry consent checkbox
-   - With consent (checked): Collects anonymized prompts, code snippets, and screenshots
-   - Without consent (unchecked): Only collects minimal anonymous usage data (tool names, success/failure, duration)
+   - With consent (checked, the default): View TnC for more details on data collected.
 
 2. **Environment Variable**: Completely disable all telemetry by running:
 ```bash
@@ -359,7 +372,10 @@ Or add it to your MCP config:
 }
 ```
 
-All telemetry data is fully anonymized and used solely to improve BlenderMCP.
+Telemetry data is not linked to your name or account. It may be used to improve BlenderMCP, for research, and to train AI models.
+
+
+Full detail on what is collected, and the license you grant by leaving telemetry on, is in [TERMS_AND_CONDITIONS.md](TERMS_AND_CONDITIONS.md).
 
 ## Feedback
 

@@ -33,6 +33,8 @@ def get_package_version() -> str:
 
 MCP_VERSION = get_package_version()
 
+CONSENT_CACHE_TTL = 30.0
+
 
 class EventType(str, Enum):
     """Types of telemetry events"""
@@ -84,6 +86,10 @@ class TelemetryCollector:
         # Rate limiting tracking
         self._event_timestamps: list[float] = []
         self._rate_limit_lock = threading.Lock()
+
+        self._consent_cache: bool | None = None
+        self._consent_cached_at: float = 0.0
+        self._consent_lock = threading.Lock()
 
         # Background queue and worker
         self._queue: "queue.Queue[TelemetryEvent]" = queue.Queue(maxsize=1000)
@@ -145,18 +151,43 @@ class TelemetryCollector:
             return str(uuid.uuid4())
 
     def _check_user_consent(self) -> bool:
-        """Check if user has consented to prompt collection via Blender addon"""
+        """Whether collection is permitted. Unreachable Blender means no."""
+        return self.check_user_consent() is True
+
+    def check_user_consent(self) -> bool | None:
+        """Consent from Blender: True, False, or None if unreachable.
+
+        Cached for CONSENT_CACHE_TTL seconds. A mutating tool call would
+        otherwise trigger several consent round-trips (telemetry event, plus a
+        before/after trajectory snapshot each), all serialized on the single
+        Blender socket.
+        """
+        with self._consent_lock:
+            if (
+                self._consent_cache is not None
+                and (time.time() - self._consent_cached_at) < CONSENT_CACHE_TTL
+            ):
+                return self._consent_cache
+
         try:
-            # Import here to avoid circular dependency
             from .server import get_blender_connection
             blender = get_blender_connection()
             result = blender.send_command("get_telemetry_consent")
-            consent = result.get("consent", False)
-            return consent
+            consent = bool(result.get("consent", False))
         except Exception as e:
             logger.debug(f"Could not check telemetry consent: {e}")
-            # Default to False if we can't check (user hasn't given consent or Blender not connected)
-            return False
+            return None
+
+        with self._consent_lock:
+            self._consent_cache = consent
+            self._consent_cached_at = time.time()
+        return consent
+
+    def invalidate_consent_cache(self) -> None:
+        """Force the next consent check to re-query Blender."""
+        with self._consent_lock:
+            self._consent_cache = None
+            self._consent_cached_at = 0.0
 
     def record_event(
         self,

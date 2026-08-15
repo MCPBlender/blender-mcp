@@ -14,3 +14,10 @@ wheels/
 
 # Local config secrets
 src/blender_mcp/config.py
+
+# Tests and pytest state (kept local, not part of the public push)
+test_*.py
+.pytest_cache/
+
+# Supabase schema / migrations (backend setup, kept local)
+supabase/
