@@ -1877,10 +1877,10 @@ class BlenderMCPServer:
     def set_telemetry_consent(self, consent=False):
         """Write the telemetry consent preference.
 
-        Only reached when the user answered an elicitation prompt in their MCP
-        client, or asked to opt out. Assigning the property in code skips the
-        BoolProperty update= callback, so the manual-edit handlers are
-        re-synced explicitly.
+        Single global switch shared by the BlenderMCP sidebar checkbox,
+        Preferences, first-run elicitation, and enable/disable_telemetry MCP
+        tools. Assigning the property in code skips the BoolProperty update=
+        callback, so the manual-edit handlers are re-synced explicitly.
         """
         try:
             addon_prefs = bpy.context.preferences.addons.get(__name__)
@@ -3153,8 +3153,8 @@ class BLENDERMCP_AddonPreferences(bpy.types.AddonPreferences):
 
     telemetry_consent: BoolProperty(
         name="Allow Telemetry",
-        description="Allow collection of prompts, code snippets, screenshots, and trajectory data to help improve Blender MCP",
-        default=True,
+        description="Opt in to collection of prompts, code snippets, screenshots, and trajectory data to help improve Blender MCP. Off by default.",
+        default=False,
         update=_on_telemetry_consent_changed,
     )
     hyper3d_api_key: bpy.props.StringProperty(
@@ -3189,20 +3189,20 @@ class BLENDERMCP_AddonPreferences(bpy.types.AddonPreferences):
     def draw(self, context):
         layout = self.layout
         
-        # Telemetry section
+        # Telemetry section (same switch as the sidebar panel and MCP tools)
         layout.label(text="Telemetry & Privacy:", icon='PREFERENCES')
         
         box = layout.box()
         row = box.row()
-        row.prop(self, "telemetry_consent", text="Allow Telemetry")
+        row.prop(self, "telemetry_consent", text="Allow Telemetry (opt-in)")
 
         # Info text
         box.separator()
         if self.telemetry_consent:
-            box.label(text="With consent: We collect anonymized prompts, code, screenshots,", icon='INFO')
+            box.label(text="Opted in: We collect anonymized prompts, code, screenshots,", icon='INFO')
             box.label(text="and trajectory data (actions, scene state, feedback).", icon='BLANK1')
         else:
-            box.label(text="Without consent: We only collect minimal anonymous usage data", icon='INFO')
+            box.label(text="Opted out (default): Only minimal anonymous usage data", icon='INFO')
             box.label(text="(tool names, success/failure, duration - no prompts or code).", icon='BLANK1')
         box.separator()
         box.label(text="Data is not linked to your name or account. Change this anytime.", icon='CHECKMARK')
@@ -3278,6 +3278,20 @@ class BLENDERMCP_PT_Panel(bpy.types.Panel):
         else:
             layout.operator("blendermcp.stop_server", text="Disconnect from MCP server")
             layout.label(text=f"Running on port {scene.blendermcp_port}")
+
+        # Same global switch as Preferences and enable/disable_telemetry MCP tools
+        layout.separator()
+        telemetry_box = layout.box()
+        telemetry_box.label(text="Help improve Blender MCP", icon='INFO')
+        if prefs:
+            telemetry_box.prop(prefs, "telemetry_consent", text="Allow Telemetry (opt-in)")
+            if prefs.telemetry_consent:
+                telemetry_box.label(text="Sharing prompts, code, screenshots & scene data")
+            else:
+                telemetry_box.label(text="Off by default — tick to opt in")
+            telemetry_box.operator("blendermcp.open_terms", text="Terms & Conditions", icon='TEXT')
+        else:
+            telemetry_box.label(text="Open Preferences → Add-ons → Blender MCP")
         
         # Feedback section
         layout.separator()

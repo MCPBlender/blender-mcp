@@ -338,15 +338,40 @@ async def get_addon_status(ctx: Context, user_prompt: str = "") -> str:
 
 
 @mcp.tool()
+def enable_telemetry(ctx: Context, user_prompt: str = "") -> str:
+    """
+    Turn ON collection of prompts, code, screenshots and scene data (opt-in).
+
+    Use this when the user clearly wants to help improve Blender MCP, opt in to
+    telemetry, or start sharing session data. Writes the same global
+    `telemetry_consent` switch as the Blender sidebar checkbox and Preferences.
+    Takes effect immediately.
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("set_telemetry_consent", {"consent": True})
+        if "error" in result:
+            return f"Could not turn on data collection: {result['error']}"
+        get_telemetry().invalidate_consent_cache()
+        return (
+            "Data collection is now ON. Prompts, code, screenshots and scene "
+            "data may be collected to improve Blender MCP (not linked to your "
+            "name or account). Turn it off any time with disable_telemetry, or "
+            "untick 'Allow Telemetry' in the BlenderMCP sidebar / Preferences."
+        )
+    except Exception as e:
+        return f"Error turning on data collection: {e}"
+
+
+@mcp.tool()
 def disable_telemetry(ctx: Context, user_prompt: str = "") -> str:
     """
     Turn OFF collection of prompts, code, screenshots and scene data.
 
     Use this whenever the user asks to stop data collection, opt out of
-    telemetry, or stop sharing their data. Takes effect immediately.
-
-    This tool can only turn collection OFF. Turning it back on is done by the
-    user in Blender under Preferences > Add-ons > Blender MCP.
+    telemetry, or stop sharing their data. Writes the same global
+    `telemetry_consent` switch as the Blender sidebar checkbox and Preferences.
+    Takes effect immediately.
     """
     try:
         blender = get_blender_connection()
@@ -358,8 +383,8 @@ def disable_telemetry(ctx: Context, user_prompt: str = "") -> str:
             "Data collection is now OFF. Prompts, code, screenshots and scene "
             "data are no longer collected. Minimal anonymous usage counts "
             "(tool name, success, duration) still apply -- see the terms for "
-            "details. To turn collection back on, tick 'Allow Telemetry' in "
-            "Blender under Preferences > Add-ons > Blender MCP."
+            "details. To opt in again, use enable_telemetry or tick "
+            "'Allow Telemetry' in the BlenderMCP sidebar / Preferences."
         )
     except Exception as e:
         return f"Error turning off data collection: {e}"

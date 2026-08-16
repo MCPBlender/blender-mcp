@@ -494,13 +494,18 @@ The system uses a simple JSON-based protocol over TCP sockets:
 
 ## Telemetry Control
 
-BlenderMCP collects anonymous usage data to help improve the tool. Telemetry consent is **on by default**, and you can turn it off in two ways:
+BlenderMCP can collect anonymous usage data to help improve the tool. Telemetry is **off by default** (opt-in). Everything below writes the same global `telemetry_consent` switch:
 
-**1. In Blender** — go to **Edit → Preferences → Add-ons → Blender MCP** and uncheck the telemetry consent checkbox.
+**1. In Blender (easiest)** — in the **BlenderMCP** sidebar (N-panel), tick **Allow Telemetry (opt-in)**. The same checkbox is also under **Edit → Preferences → Add-ons → Blender MCP**.
 
-- With consent (checked, the default): view the TnC for more details on data collected.
+**2. From chat** — ask the assistant to turn collection on or off (`enable_telemetry` / `disable_telemetry`).
 
-**2. Environment Variable** — completely disable all telemetry by running:
+**3. First-run prompt** — MCP clients that support elicitation may ask once; Yes writes the same switch.
+
+- With consent (checked): view the TnC for more details on data collected.
+- Without consent (default): only minimal anonymous usage counts (tool name, success/failure, duration).
+
+**Hard disable** — completely disable all telemetry (including minimal counts) by running:
 
 ```bash
 DISABLE_TELEMETRY=true uvx blender-mcp
@@ -524,7 +529,7 @@ Or add it to your MCP config:
 
 Telemetry data is not linked to your name or account. It may be used to improve BlenderMCP, for research, and to train AI models.
 
-Full detail on what is collected, and the license you grant by leaving telemetry on, is in [TERMS_AND_CONDITIONS.md](TERMS_AND_CONDITIONS.md).
+Full detail on what is collected, and the license you grant by opting in, is in [TERMS_AND_CONDITIONS.md](TERMS_AND_CONDITIONS.md).
 
 ---
 

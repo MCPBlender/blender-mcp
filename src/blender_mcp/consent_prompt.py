@@ -1,13 +1,13 @@
 """First-run telemetry consent prompt.
 
 Consent lives in one place: the ``telemetry_consent`` checkbox in the Blender
-addon preferences, which is on by default. This module only decides *when* to
-ask about it and how the answer gets there, so it only has anything to do for
-users who have turned the checkbox off.
+addon preferences (also shown on the BlenderMCP sidebar). It is **off by
+default** (opt-in). This module decides *when* to ask and how the answer gets
+written to that same switch.
 
 Only clients declaring the ``elicitation`` capability are asked, via a yes/no
 dialog the client renders itself; only an explicit ``accept`` with
-``consent=True`` turns collection back on. Clients without it are left alone --
+``consent=True`` turns collection on. Clients without it are left alone --
 a model relaying a prose answer is not the user answering, so those users are
 asked in the Blender addon instead.
 
@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger("BlenderMCPConsent")
 
 # Bump to re-ask everyone (e.g. if what gets collected changes materially).
-CONSENT_PROMPT_VERSION = 1
+CONSENT_PROMPT_VERSION = 2
 
 _state_lock = threading.Lock()
 # Keyed by client session: the server process outlives any one conversation.
@@ -51,9 +51,10 @@ class TelemetryConsentResponse(BaseModel):
 PROMPT_MESSAGE = (
     "Blender MCP can collect data from this session to help improve the tool: "
     "your prompts, the code that gets generated, viewport screenshots, and scene "
-    "metadata. It is not linked to your name or account, and you can change this "
-    "any time in Blender under Preferences > Add-ons > Blender MCP.\n\n"
-    "Collection is on by default, but it is currently OFF for you. Turn it back on?"
+    "metadata. It is not linked to your name or account. Collection is off unless "
+    "you opt in, and you can change this any time in Blender (sidebar checkbox or "
+    "Preferences > Add-ons > Blender MCP).\n\n"
+    "Help improve Blender MCP by turning collection on?"
 )
 
 def _state_path() -> Path:
@@ -136,7 +137,7 @@ def _apply_consent(consent: bool) -> bool:
     """Write consent to Blender and refresh the cached value."""
     try:
         from .server import get_blender_connection
-        from .telemetry import telemetry
+        from .telemetry import get_telemetry
 
         blender = get_blender_connection()
         result = blender.send_command(
@@ -145,7 +146,7 @@ def _apply_consent(consent: bool) -> bool:
         if "error" in result:
             logger.debug(f"Addon rejected consent write: {result['error']}")
             return False
-        telemetry.invalidate_consent_cache()
+        get_telemetry().invalidate_consent_cache()
         return True
     except Exception as e:
         logger.debug(f"Could not set telemetry consent: {e}")
@@ -195,8 +196,9 @@ async def maybe_prompt_for_consent(ctx: Any) -> str:
             if granted and _apply_consent(True):
                 return (
                     "\n\n---\n"
-                    "Data collection is now ON. You can turn it off any time in "
-                    "Blender under Preferences > Add-ons > Blender MCP."
+                    "Data collection is now ON. You can turn it off any time via "
+                    "the BlenderMCP sidebar, Preferences > Add-ons > Blender MCP, "
+                    "or the disable_telemetry tool."
                 )
             return ""
 

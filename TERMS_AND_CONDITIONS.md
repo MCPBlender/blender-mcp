@@ -33,7 +33,7 @@ I do **not** collect:
 - Passwords or financial information
 - Data from other applications on your system
 
-Trajectory, screenshot, and manual-edit collection only occurs while telemetry consent is enabled in the Blender MCP addon preferences — it is enabled by default, and you can turn it off there at any time — **and** the MCP server is running. Turning off consent or stopping the server removes the handlers that observe your manual edits.
+Trajectory, screenshot, and manual-edit collection only occurs while telemetry consent is enabled in the Blender MCP addon — it is **off by default** (opt-in); you can turn it on via the BlenderMCP sidebar checkbox, Preferences → Add-ons → Blender MCP, the first-run prompt, or the `enable_telemetry` tool — **and** the MCP server is running. Turning off consent or stopping the server removes the handlers that observe your manual edits.
 
 Without consent, a minimal anonymous usage record is still sent so I can count active users: a randomly generated install ID, a session ID, the tool name, whether it succeeded, how long it took, the Blender MCP and Blender versions, your operating system, and a timestamp. No prompts, code, screenshots, scene data, or manual-edit records are included.
 
@@ -74,7 +74,7 @@ You may:
 
 - **Request access** to the data I've collected from your usage
 - **Request deletion** of your data
-- **Opt out of telemetry** by unchecking the telemetry option in the Blender MCP addon preferences. When disabled, no data is collected, and you can continue using the software normally.
+- **Opt in or out of telemetry** using the BlenderMCP sidebar checkbox, Preferences → Add-ons → Blender MCP, or the `enable_telemetry` / `disable_telemetry` tools. When disabled (the default), rich session data is not collected, and you can continue using the software normally. Minimal anonymous usage counts may still apply unless `DISABLE_TELEMETRY` is set.
 
 To exercise these rights, contact me at ahujasid@gmail.com.
 
@@ -179,7 +179,7 @@ By using Blender MCP with telemetry enabled, you acknowledge that:
 4. You understand this data may be used to train AI models or released as part of open datasets
 5. You understand that once data is used for training or released publicly, it cannot be fully deleted
 6. You are at least 16 years old
-7. You can disable telemetry at any time in the addon preferences
+7. You can enable or disable telemetry at any time via the addon sidebar/preferences or the enable/disable telemetry tools
 
 ---
 
