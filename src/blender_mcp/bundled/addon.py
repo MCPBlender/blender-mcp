@@ -576,8 +576,11 @@ class BlenderMCPServer:
                         # thread-safe and the callback can be silently lost.
                         print(f"Queued command: {command.get('type')}")
                         self.command_queue.put((command, client))
-                    except json.JSONDecodeError:
-                        # Incomplete data, wait for more
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        # Incomplete data, wait for more. A multi-byte UTF-8
+                        # character can land split across a recv() chunk
+                        # boundary, which fails decode() before json.loads()
+                        # ever runs - that's incomplete data too, not garbage.
                         pass
                 except socket.timeout:
                     # Expected; loop round and re-check self.running.
