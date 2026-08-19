@@ -1,0 +1,130 @@
+name: Publish Docker image
+
+# Publishing runs only on a published release. A `push: tags` trigger would run this
+# a second time for the same version and the two runs would race on the same tags.
+on:
+  release:
+    types: [published]
+
+# Fixed, repository-wide group (deliberately NOT keyed on the ref): releases must be
+# serialized, otherwise two concurrent runs can move :latest and the major/minor
+# aliases out of order.
+concurrency:
+  group: docker-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required to push to ghcr.io. Uses the built-in GITHUB_TOKEN, so no
+      # repository secret needs to be configured.
+      packages: write
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      # Build and smoke-test each architecture before anything is published, so a
+      # broken entrypoint or an arch-specific import error fails CI instead of shipping.
+      - name: Build amd64 for smoke test
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: blender-mcp:smoketest-amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build arm64 for smoke test
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/arm64
+          load: true
+          tags: blender-mcp:smoketest-arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test both architectures
+        run: |
+          set -euo pipefail
+          req='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'
+          for arch in amd64 arm64; do
+            image="blender-mcp:smoketest-${arch}"
+            echo "--- ${arch}: --help"
+            docker run --rm --platform "linux/${arch}" "$image" --help > /dev/null
+
+            echo "--- ${arch}: MCP initialize handshake"
+            # The server exits 0 when stdin closes, so a non-zero status is a real
+            # failure and must not be swallowed.
+            out=$(printf '%s\n' "$req" | timeout 120 docker run -i --rm --platform "linux/${arch}" "$image" 2>/dev/null)
+            printf '%s' "$out" | grep -q '"serverInfo"' || {
+              echo "::error::${arch}: handshake response missing serverInfo"
+              printf '%s\n' "$out"
+              exit 1
+            }
+          done
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Which tag does GitHub currently consider the latest release? Used below so that
+      # publishing an older or backfilled release cannot move the mutable aliases
+      # backwards. Read immediately before tagging.
+      - name: Determine current latest release
+        id: latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if tag=$(gh api "repos/${{ github.repository }}/releases/latest" --jq '.tag_name' 2>/tmp/gh_err); then
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          elif grep -qi 'not found' /tmp/gh_err; then
+            # No published release yet, so this one becomes latest.
+            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::could not query the latest release"
+            cat /tmp/gh_err >&2
+            exit 1
+          fi
+
+      - name: Derive tags
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # {{version}} is immutable and always published. The mutable :latest,
+          # :{{major}} and :{{major}}.{{minor}} aliases only move when this release is
+          # the repository's current latest, so re-publishing or backfilling an older
+          # release cannot move them backwards.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ github.event.release.tag_name == steps.latest.outputs.tag }}
+            type=semver,pattern={{major}},enable=${{ github.event.release.tag_name == steps.latest.outputs.tag }}
+          flavor: |
+            latest=${{ github.event.release.tag_name == steps.latest.outputs.tag }}
+
+      - name: Build and push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

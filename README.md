@@ -30,65 +30,173 @@ Prompt-assisted 3D modeling, scene creation, and manipulation — driven by AI.
 
 ## Quickstart
 
-Three steps: install `uv`, point your MCP client at the server, install the Blender addon.
+Docker is the standard installation method. It pins the Python interpreter and every
+dependency to a fixed image, so the server behaves identically on every machine.
 
-**1. Install uv**
+Five steps: install Docker, pull the image, point your MCP client at it, install the Blender addon, connect.
+
+**1. Install Docker**
+
+- **macOS / Windows:** [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+- **Linux:** [Docker Engine](https://docs.docker.com/engine/install/) (20.10 or newer)
+
+**2. Pull the image first**
 
 ```bash
-# macOS
-brew install uv
-
-# Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Windows
-powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+docker pull ghcr.io/ahujasid/blender-mcp:latest
 ```
 
-> **Warning:** Do not proceed before installing uv. Use the official installer — *not* `pip install uv`.
+> **Do this before configuring your client.** Some MCP clients time out while a first-run
+> download is still in progress and mark the server as failed.
 
-**2. Add the MCP server to your client**
+> **Pinning a version.** `:latest` follows each release. To keep a machine on one exact
+> build — recommended if you want reproducible behaviour across a team — replace `:latest`
+> with a version tag everywhere below, for example
+> `ghcr.io/ahujasid/blender-mcp:1.8.3`. Upgrade the addon and the image together, since
+> both ship from the same tag.
+
+**3. Add the MCP server to your client**
 
 <details open>
 <summary><b>Claude Desktop</b> — Settings → Developer → Edit Config</summary>
+
+**macOS** — first create the shared screenshot directory once:
+
+```bash
+mkdir -p /tmp/blender-mcp-shared
+```
 
 ```json
 {
     "mcpServers": {
         "blender": {
-            "command": "uvx",
-            "args": ["blender-mcp"]
+            "command": "docker",
+            "args": [
+                "run", "-i", "--rm",
+                "-e", "TMPDIR=/tmp/blender-mcp-shared",
+                "-v", "/tmp/blender-mcp-shared:/tmp/blender-mcp-shared",
+                "ghcr.io/ahujasid/blender-mcp:latest"
+            ]
         }
     }
 }
 ```
+
+**Linux** — same, plus host networking so the container reaches Blender on loopback:
+
+```bash
+mkdir -p /tmp/blender-mcp-shared
+```
+
+```json
+{
+    "mcpServers": {
+        "blender": {
+            "command": "docker",
+            "args": [
+                "run", "-i", "--rm", "--network=host",
+                "-e", "BLENDER_HOST=localhost",
+                "-e", "TMPDIR=/tmp/blender-mcp-shared",
+                "-v", "/tmp/blender-mcp-shared:/tmp/blender-mcp-shared",
+                "ghcr.io/ahujasid/blender-mcp:latest"
+            ]
+        }
+    }
+}
+```
+
+**Windows** — no shared directory, because Windows host paths cannot be mapped to an
+identical path inside the container:
+
+```json
+{
+    "mcpServers": {
+        "blender": {
+            "command": "docker",
+            "args": [
+                "run", "-i", "--rm",
+                "ghcr.io/ahujasid/blender-mcp:latest"
+            ]
+        }
+    }
+}
+```
+
+> **Windows limitation:** tools that exchange files between Blender and the server are
+> unavailable in this configuration — `get_viewport_screenshot`, and Hyper3D generation
+> from *local image paths*. Everything else, including Hyper3D from image URLs, works
+> normally. See [Host file access](#host-file-access).
 </details>
 
 <details>
 <summary><b>Claude Code</b></summary>
 
+**macOS:**
+
 ```bash
-claude mcp add blender uvx blender-mcp
+mkdir -p /tmp/blender-mcp-shared
+claude mcp add blender -- docker run -i --rm \
+  -e TMPDIR=/tmp/blender-mcp-shared \
+  -v /tmp/blender-mcp-shared:/tmp/blender-mcp-shared \
+  ghcr.io/ahujasid/blender-mcp:latest
+```
+
+**Windows** — no shared directory; screenshots are unavailable:
+
+```bash
+claude mcp add blender -- docker run -i --rm ghcr.io/ahujasid/blender-mcp:latest
+```
+
+**Linux:**
+
+```bash
+mkdir -p /tmp/blender-mcp-shared
+claude mcp add blender -- docker run -i --rm --network=host \
+  -e BLENDER_HOST=localhost \
+  -e TMPDIR=/tmp/blender-mcp-shared \
+  -v /tmp/blender-mcp-shared:/tmp/blender-mcp-shared \
+  ghcr.io/ahujasid/blender-mcp:latest
 ```
 </details>
 
 <details>
 <summary><b>Cursor / VS Code / OpenCode</b></summary>
 
-See [MCP Client Setup](#mcp-client-setup) below for per-client instructions and one-click install buttons.
+See [MCP Client Setup](#mcp-client-setup) below for per-client instructions.
 </details>
 
-**3. Install the Blender addon**
+**4. Install the Blender addon**
+
+Mount your Blender addons folder into the container. Replace `4.2` with your Blender version:
 
 ```bash
-uvx blender-mcp install-addon
+# macOS
+docker run --rm \
+  -v "$HOME/Library/Application Support/Blender/4.2/scripts/addons:/addons" \
+  ghcr.io/ahujasid/blender-mcp:latest install-addon --addons-dir /addons
+
+# Linux
+docker run --rm \
+  -v "$HOME/.config/blender/4.2/scripts/addons:/addons" \
+  ghcr.io/ahujasid/blender-mcp:latest install-addon --addons-dir /addons
 ```
+
+```powershell
+# Windows (PowerShell)
+docker run --rm `
+  -v "$env:APPDATA\Blender Foundation\Blender\4.2\scripts\addons:/addons" `
+  ghcr.io/ahujasid/blender-mcp:latest install-addon --addons-dir /addons
+```
+
+The addon ships inside the image, so it matches the server **as long as you install it
+from the same image reference you run**. If you later pull a newer image, reinstall the
+addon from that image too.
 
 Then in Blender: **Edit → Preferences → Add-ons** → enable **Interface: Blender MCP**.
 
-**4. Connect**
+**5. Connect**
 
-In Blender's 3D viewport, press `N` → open the **BlenderMCP** tab → click **Start MCP Server**. That's it — ask Claude to build something.
+In Blender's 3D viewport, press `N` → open the **BlenderMCP** tab → click **Connect to MCP server**. That's it — ask Claude to build something.
 
 > **Note:** Only run **one** instance of the MCP server (either Cursor or Claude Desktop), not both.
 
@@ -101,10 +209,13 @@ In Blender's 3D viewport, press `N` → open the **BlenderMCP** tab → click **
 - [Components](#components)
 - [Installation](#installation)
   - [Prerequisites](#prerequisites)
-  - [Make your client find uvx](#make-your-client-find-uvx)
-  - [Pin the Python version](#pin-the-python-version)
-  - [Install without uv](#install-without-uv)
-  - [Environment Variables](#environment-variables)
+  - [Why Docker is the standard method](#why-docker-is-the-standard-method)
+  - [Platform differences](#platform-differences)
+  - [Networking](#networking)
+  - [Host file access](#host-file-access)
+  - [Verifying the installation](#verifying-the-installation)
+  - [Environment variables](#environment-variables)
+- [Deprecated: installing with uvx](#deprecated-installing-with-uvx)
 - [MCP Client Setup](#mcp-client-setup)
   - [Claude for Desktop](#claude-for-desktop)
   - [Cursor](#cursor)
@@ -154,23 +265,114 @@ The system consists of two main components:
 ### Prerequisites
 
 - **Blender** 3.0 or newer
-- **Python** 3.10 or newer
-- **uv** package manager
+- **Docker** — [Docker Desktop](https://www.docker.com/products/docker-desktop/) on macOS/Windows, or [Docker Engine](https://docs.docker.com/engine/install/) 20.10+ on Linux
 
-<details>
-<summary><b>Installing uv, per platform</b></summary>
+No Python installation is required on the host. The image supplies its own interpreter.
 
-**macOS**
-```bash
-brew install uv
+### Why Docker is the standard method
+
+The image fixes the Python interpreter and every dependency, so the server is identical on
+every machine. That removes an entire category of reported problems: dependency build
+failures on Windows, `ModuleNotFoundError` from mismatched `mcp` versions, conda/pyenv
+interpreter conflicts, console encoding corruption, and `spawn uvx ENOENT` when a
+GUI-launched client cannot see `~/.local/bin`.
+
+It also keeps the addon and the server in lockstep, since both ship in the same image.
+
+### Platform differences
+
+Every example in this README is written in its **macOS** form. This table is the single
+place that describes how to adapt it — the client sections below do not repeat it.
+
+| | macOS | Linux | Windows |
+|---|---|---|---|
+| Networking | default | add `--network=host` and `-e BLENDER_HOST=localhost` | default |
+| Shared directory | `-e TMPDIR=/tmp/blender-mcp-shared` and `-v /tmp/blender-mcp-shared:/tmp/blender-mcp-shared` | same as macOS | **omit** — not possible |
+| File-based tools | work | work | unavailable |
+| Non-1000 user id | n/a | add `--user $(id -u):$(id -g)` | n/a |
+
+**Linux notes.** `--network=host` requires rootful Docker Engine. Under rootless Docker it
+is namespaced and cannot reach the host's loopback, so Blender is unreachable. If your host
+user id is not 1000, add `--user $(id -u):$(id -g)` so the container can write to the
+directories you mount.
+
+### Networking
+
+Blender runs on your host, not in the container. The container connects out to it on
+port 9876.
+
+- **macOS / Windows (Docker Desktop):** works with no extra flags. `host.docker.internal`
+  resolves to the host, and Docker Desktop proxies the connection so Blender's default
+  `localhost` binding is reachable.
+- **Linux (rootful Docker Engine):** use `--network=host` with `BLENDER_HOST=localhost`. The
+  container then shares the host network namespace and reaches Blender's loopback socket
+  directly. Do **not** reconfigure Blender to listen on `0.0.0.0` — that would expose the
+  addon's code-execution socket to your whole network.
+
+### Host file access
+
+Some tools pass a *file path* between Blender and the server. Since the server runs in a
+container, those paths only work if the directory exists at the **same absolute path** on
+both sides. That is what these arguments do:
+
+```
+-e TMPDIR=/tmp/blender-mcp-shared
+-v /tmp/blender-mcp-shared:/tmp/blender-mcp-shared
 ```
 
-**Windows**
-```powershell
+Create it once with `mkdir -p /tmp/blender-mcp-shared`. Affected tools:
+
+- **`get_viewport_screenshot`** — Blender writes the image, the server reads it back.
+  Without the shared directory it fails with `Screenshot file was not created`.
+- **Hyper3D generation from local image paths** — the server opens the files you name, so
+  they must be inside the shared directory. Generating from image *URLs* is unaffected.
+
+> **Known limitation:** on Windows, host paths (`C:\...`) cannot be mapped to an identical
+> container path, so the tools above are unavailable when running the server in Docker on
+> Windows. Everything else works normally.
+
+### Verifying the installation
+
+```bash
+docker run --rm ghcr.io/ahujasid/blender-mcp:latest --help
+```
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `BLENDER_HOST` | `host.docker.internal` (in the image) | Host address for the Blender socket server |
+| `BLENDER_PORT` | `9876` | Port for the Blender socket server |
+| `TMPDIR` | `/tmp` | Directory used for screenshot hand-off; must be a shared mount |
+
+---
+
+## Deprecated: installing with uvx
+
+> **Deprecated.** The `uvx blender-mcp` path still works and is still published to PyPI,
+> but it is no longer the recommended installation and receives no new setup
+> documentation. New installs should use Docker. Existing setups keep working; migrate
+> when convenient.
+
+<details>
+<summary><b>Legacy uvx instructions</b></summary>
+
+**Prerequisites:** Blender 3.0+, Python 3.10+, and the `uv` package manager.
+
+**Installing uv**
+
+```bash
+# macOS
+brew install uv
+
+# Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows
 powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-Then add uv to the user path in Windows (you may need to restart Claude Desktop after):
+On Windows, add uv to the user path (restart Claude Desktop afterwards):
 
 ```powershell
 $localBin = "$env:USERPROFILE\.local\bin"
@@ -178,19 +380,15 @@ $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 [Environment]::SetEnvironmentVariable("Path", "$userPath;$localBin", "User")
 ```
 
-**Linux**
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
+On every OS, use uv's official installer — **not** `pip install uv`, which may not create
+the `uvx` command and can hide uv inside an environment your client cannot see.
 
-It lands in `~/.local/bin` — open a new shell so it's on your PATH.
+**Migrating to Docker**
 
-Otherwise, installation instructions are on their website: [Install uv](https://docs.astral.sh/uv/getting-started/installation/)
-
-On every OS, use uv's **official installer above — not `pip install uv`**, which may not create the `uvx` command and can hide uv inside an environment your client can't see.
-</details>
-
-> **Warning:** Do not proceed before installing uv.
+Replace the `uvx` command in your client configuration with the Docker command shown in
+[Quickstart](#quickstart). Your Blender addon and existing projects do not need to change.
+If anything goes wrong, restoring the previous `uvx` configuration returns you to the old
+behaviour.
 
 ### Make your client find uvx
 
@@ -237,29 +435,25 @@ pipx ensurepath          # then restart your shell / client
 
 Use the resulting absolute path as `"command"` (find it with `which blender-mcp` / `where blender-mcp`) and omit `args`.
 
-### Environment Variables
+When running outside Docker, `BLENDER_HOST` defaults to `localhost`.
 
-The following environment variables can be used to configure the Blender connection:
-
-| Variable | Default | Description |
-|---|---|---|
-| `BLENDER_HOST` | `localhost` | Host address for Blender socket server |
-| `BLENDER_PORT` | `9876` | Port number for Blender socket server |
-
-Example:
-
-```bash
-export BLENDER_HOST='host.docker.internal'
-export BLENDER_PORT=9876
-```
+</details>
 
 ---
 
 ## MCP Client Setup
 
-### Claude for Desktop
+All clients run the same image, with the same arguments. **Every configuration below is
+written in its macOS form** — see [Platform differences](#platform-differences) for the one
+table that describes how to adapt it for Linux and Windows.
 
-[Watch the setup instruction video](https://www.youtube.com/watch?v=neoK_WMq92g) (assuming you have already installed uv)
+On macOS and Linux, create the shared directory once:
+
+```bash
+mkdir -p /tmp/blender-mcp-shared
+```
+
+### Claude for Desktop
 
 Go to **Claude → Settings → Developer → Edit Config → `claude_desktop_config.json`** and include the following:
 
@@ -267,9 +461,12 @@ Go to **Claude → Settings → Developer → Edit Config → `claude_desktop_co
 {
     "mcpServers": {
         "blender": {
-            "command": "uvx",
+            "command": "docker",
             "args": [
-                "blender-mcp"
+                "run", "-i", "--rm",
+                "-e", "TMPDIR=/tmp/blender-mcp-shared",
+                "-v", "/tmp/blender-mcp-shared:/tmp/blender-mcp-shared",
+                "ghcr.io/ahujasid/blender-mcp:latest"
             ]
         }
     }
@@ -282,15 +479,16 @@ Go to **Claude → Settings → Developer → Edit Config → `claude_desktop_co
 Use the Claude Code CLI to add the blender MCP server:
 
 ```bash
-claude mcp add blender uvx blender-mcp
+claude mcp add blender -- docker run -i --rm \
+  -e TMPDIR=/tmp/blender-mcp-shared \
+  -v /tmp/blender-mcp-shared:/tmp/blender-mcp-shared \
+  ghcr.io/ahujasid/blender-mcp:latest
 ```
 </details>
 
 ### Cursor
 
-[![Install MCP Server](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/link/mcp%2Finstall?name=blender&config=eyJjb21tYW5kIjoidXZ4IGJsZW5kZXItbWNwIn0%3D)
-
-**macOS** — go to **Settings → MCP** and paste the following:
+Go to **Settings → MCP** and paste the following:
 
 - To use as a global server, use the *"add new global MCP server"* button and paste
 - To use as a project-specific server, create `.cursor/mcp.json` in the root of the project and paste
@@ -299,33 +497,21 @@ claude mcp add blender uvx blender-mcp
 {
     "mcpServers": {
         "blender": {
-            "command": "uvx",
+            "command": "docker",
             "args": [
-                "blender-mcp"
+                "run", "-i", "--rm",
+                "-e", "TMPDIR=/tmp/blender-mcp-shared",
+                "-v", "/tmp/blender-mcp-shared:/tmp/blender-mcp-shared",
+                "ghcr.io/ahujasid/blender-mcp:latest"
             ]
         }
     }
 }
 ```
 
-**Windows** — go to **Settings → MCP → Add Server**, add a new server with the following settings:
-
-```json
-{
-    "mcpServers": {
-        "blender": {
-            "command": "cmd",
-            "args": [
-                "/c",
-                "uvx",
-                "blender-mcp"
-            ]
-        }
-    }
-}
-```
-
-[Cursor setup video](https://www.youtube.com/watch?v=wgWsJshecac)
+This is the macOS form. On Linux and Windows, adjust it as described in
+[Platform differences](#platform-differences). No `cmd /c` wrapper is needed on Windows,
+because `docker` resolves on the PATH that GUI applications inherit.
 
 > **Note:** Only run **one** instance of the MCP server (either on Cursor or Claude Desktop), not both.
 
@@ -333,21 +519,40 @@ claude mcp add blender uvx blender-mcp
 
 *Prerequisites*: Make sure you have [Visual Studio Code](https://code.visualstudio.com/) installed before proceeding.
 
-[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_blender--mcp_server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=ffffff)](vscode:mcp/install?%7B%22name%22%3A%22blender-mcp%22%2C%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22blender-mcp%22%5D%7D)
+Add the server to `mcp.json` (macOS form — see
+[Platform differences](#platform-differences)):
+
+```json
+{
+    "servers": {
+        "blender-mcp": {
+            "type": "stdio",
+            "command": "docker",
+            "args": [
+                "run", "-i", "--rm",
+                "-e", "TMPDIR=/tmp/blender-mcp-shared",
+                "-v", "/tmp/blender-mcp-shared:/tmp/blender-mcp-shared",
+                "ghcr.io/ahujasid/blender-mcp:latest"
+            ]
+        }
+    }
+}
+```
 
 ### OpenCode
+
+macOS form — see [Platform differences](#platform-differences) for Linux and Windows:
 
 ```json
 {
   "mcp": {
     "blender-mcp": {
       "type": "local",
-      "command": ["uvx", "blender-mcp"],
-      "enabled": true,
-      "environment": {
-        "BLENDER_HOST": "localhost",
-        "BLENDER_PORT": "9876"
-      }
+      "command": ["docker", "run", "-i", "--rm",
+                  "-e", "TMPDIR=/tmp/blender-mcp-shared",
+                  "-v", "/tmp/blender-mcp-shared:/tmp/blender-mcp-shared",
+                  "ghcr.io/ahujasid/blender-mcp:latest"],
+      "enabled": true
     }
   }
 }
@@ -357,15 +562,33 @@ claude mcp add blender uvx blender-mcp
 
 ## Installing the Blender Addon
 
-**1. Recommended** — from a terminal, run:
+**1. Recommended** — mount your Blender addons folder into the container and run the
+installer. Replace `4.2` with your Blender version:
 
 ```bash
-uvx blender-mcp install-addon
+# macOS
+docker run --rm \
+  -v "$HOME/Library/Application Support/Blender/4.2/scripts/addons:/addons" \
+  ghcr.io/ahujasid/blender-mcp:latest install-addon --addons-dir /addons
+
+# Linux
+docker run --rm \
+  -v "$HOME/.config/blender/4.2/scripts/addons:/addons" \
+  ghcr.io/ahujasid/blender-mcp:latest install-addon --addons-dir /addons
 ```
 
-This copies the addon into your Blender addons folder as `blender_mcp.py`. It prints where it wrote to, and keeps a `.bak` of any file it replaces.
+```powershell
+# Windows (PowerShell)
+docker run --rm `
+  -v "$env:APPDATA\Blender Foundation\Blender\4.2\scripts\addons:/addons" `
+  ghcr.io/ahujasid/blender-mcp:latest install-addon --addons-dir /addons
+```
 
-> Optional: `uvx blender-mcp addon-paths` lists detected Blender addons folders. Override the destination with `BLENDERMCP_ADDONS_DIR=/path/to/scripts/addons`.
+This copies the addon into that folder as `blender_mcp.py`. It prints where it wrote to, and keeps a `.bak` of any file it replaces.
+
+The addon ships inside the image, so it matches the server **as long as you install it
+from the same image reference you run**. If you later pull a newer image, reinstall the
+addon from that image too.
 
 **2.** Open Blender
 
@@ -375,20 +598,33 @@ This copies the addon into your Blender addons folder as `blender_mcp.py`. It pr
 
 **5. Manual alternative** — if the command above can't find your Blender install, or you prefer doing it by hand: download `addon.py` from this repo → in Blender, **Edit → Preferences → Add-ons → Install…** → select the downloaded `addon.py` → enable it.
 
-Then open the **BlenderMCP** tab in Blender's sidebar (press `N` in the 3D viewport) and click **Start MCP Server**. See [Starting the Connection](#starting-the-connection) below.
+Then open the **BlenderMCP** tab in Blender's sidebar (press `N` in the 3D viewport) and click **Connect to MCP server**. See [Starting the Connection](#starting-the-connection) below.
 
 ## Upgrading (existing users)
 
 > For newcomers, go straight to [Quickstart](#quickstart). For existing users, see below.
 
-**1.** Update the addon file by running:
+**1.** Pull the image:
 
 ```bash
-uvx blender-mcp install-addon
-uvx blender-mcp addon-paths   # optional: list detected Blender addons folders
+docker pull ghcr.io/ahujasid/blender-mcp:latest
 ```
 
-**2.** In Blender: **Preferences → Add-ons** → disable and re-enable **Interface: Blender MCP** (or restart Blender), then click **Start MCP Server** again.
+> If your client configuration pins a version tag rather than `:latest`, pull **that** tag
+> here, install the addon from the same tag below, and update the tag in your client
+> configuration together. Mixing a pinned client with a `:latest` addon pairs mismatched
+> versions.
+
+Then reinstall the addon from it, using the command for your platform from
+[Installing the Blender Addon](#installing-the-blender-addon). On macOS, for example:
+
+```bash
+docker run --rm \
+  -v "$HOME/Library/Application Support/Blender/4.2/scripts/addons:/addons" \
+  ghcr.io/ahujasid/blender-mcp:latest install-addon --addons-dir /addons
+```
+
+**2.** In Blender: **Preferences → Add-ons** → disable and re-enable **Interface: Blender MCP** (or restart Blender), then click **Connect to MCP server** again.
 
 **3.** Delete the MCP server from Claude and add it back again if the server package itself needs a refresh.
 
@@ -406,7 +642,7 @@ uvx blender-mcp addon-paths   # optional: list detected Blender addons folders
 2. Find the **BlenderMCP** tab
 3. Turn on the checkboxes you'd like to use (see more under [Capabilities](#capabilities) below)
 4. Click **Connect to Claude**
-5. Make sure the MCP server is running in your terminal
+5. Keep your MCP client running — it launches the container for you. Do not run the `docker run` command yourself.
 
 ### Using with Claude
 
@@ -471,7 +707,7 @@ For headless setups or CI, credentials can also be injected by environment varia
 
 | Problem | Fix |
 |---|---|
-| **Connection issues** | Make sure the Blender addon server is running, and the MCP server is configured on Claude. **Do not** run the `uvx` command in the terminal. Sometimes the first command won't go through, but after that it starts working. |
+| **Connection issues** | Make sure the Blender addon server is running, and the MCP server is configured on Claude. **Do not** run the `docker run` command in the terminal yourself — your MCP client launches it. Sometimes the first command won't go through, but after that it starts working. |
 | **Timeout errors** | Try simplifying your requests or breaking them into smaller steps. |
 | **Poly Haven integration** | Claude is sometimes erratic with its behaviour. |
 | **Have you tried turning it off and on again?** | If you're still having connection errors, try restarting both Claude and the Blender server. |
@@ -500,26 +736,25 @@ BlenderMCP collects anonymous usage data to help improve the tool. Telemetry con
 
 - With consent (checked, the default): view the TnC for more details on data collected.
 
-**2. Environment Variable** — completely disable all telemetry by running:
+**2. Environment Variable** — completely disable all telemetry by adding these two
+arguments to whichever configuration you already use:
 
-```bash
-DISABLE_TELEMETRY=true uvx blender-mcp
+```
+"-e", "DISABLE_TELEMETRY=true",
 ```
 
-Or add it to your MCP config:
+They go in the client configuration, not a terminal command: your MCP client launches its
+own container, so running `docker run` by hand only affects that one throwaway process.
+Place them before the image name, for example:
 
-```json
-{
-    "mcpServers": {
-        "blender": {
-            "command": "uvx",
-            "args": ["blender-mcp"],
-            "env": {
-                "DISABLE_TELEMETRY": "true"
-            }
-        }
-    }
-}
+```
+"args": [
+    "run", "-i", "--rm",
+    "-e", "DISABLE_TELEMETRY=true",
+    "-e", "TMPDIR=/tmp/blender-mcp-shared",
+    "-v", "/tmp/blender-mcp-shared:/tmp/blender-mcp-shared",
+    "ghcr.io/ahujasid/blender-mcp:latest"
+]
 ```
 
 Telemetry data is not linked to your name or account. It may be used to improve BlenderMCP, for research, and to train AI models.

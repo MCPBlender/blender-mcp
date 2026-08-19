@@ -1,0 +1,20 @@
+.git
+.gitignore
+.context
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.ruff_cache
+.mypy_cache
+tests
+assets
+# root dev copy only - the bundled addon at src/blender_mcp/bundled/addon.py must ship
+/addon.py
+/main.py
+Dockerfile
+.dockerignore
+TERMS_AND_CONDITIONS.md
