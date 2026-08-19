@@ -251,6 +251,38 @@ def _blendermcp_depsgraph_post(scene, depsgraph=None):
     _edit_recorder.poll_operators()
 
 
+# Set when the user clicks Disconnect, so that opening a .blend afterwards does
+# not silently bring the server back up behind them. An explicit Connect clears
+# it, as does restarting Blender (the addon re-registers).
+_user_stopped_server = False
+
+
+@persistent
+def _blendermcp_on_load_post(*args):
+    """Start the server against the loaded scene and re-sync the panel flag.
+
+    register() runs before Blender has read a .blend, so bpy.context.scene is
+    None at startup: the file's port cannot be read and blendermcp_server_running
+    cannot be written. load_post is the first point where the scene exists.
+    """
+    scene = getattr(bpy.context, "scene", None)
+    if scene is None:
+        return
+
+    server = getattr(bpy.types, "blendermcp_server", None)
+    if scene.blendermcp_auto_start_server and not _user_stopped_server:
+        if server is None:
+            server = BlenderMCPServer(port=scene.blendermcp_port)
+            bpy.types.blendermcp_server = server
+        if not server.running:
+            # Only safe to retarget while stopped; a running server keeps its
+            # port so an already-connected client is not dropped.
+            server.port = scene.blendermcp_port
+            server.start()
+
+    scene.blendermcp_server_running = bool(server is not None and server.running)
+
+
 def _telemetry_consent_enabled():
     """Read the consent preference directly. Fails closed."""
     try:
@@ -3277,7 +3309,9 @@ class BLENDERMCP_PT_Panel(bpy.types.Panel):
             layout.operator("blendermcp.start_server", text="Connect to MCP server")
         else:
             layout.operator("blendermcp.stop_server", text="Disconnect from MCP server")
-            layout.label(text=f"Running on port {scene.blendermcp_port}")
+            server = getattr(bpy.types, "blendermcp_server", None)
+            running_port = getattr(server, "port", scene.blendermcp_port)
+            layout.label(text=f"Running on port {running_port}")
         
         # Feedback section
         layout.separator()
@@ -3318,7 +3352,9 @@ class BLENDERMCP_OT_StartServer(bpy.types.Operator):
     bl_description = "Start the BlenderMCP server to connect with Claude"
 
     def execute(self, context):
+        global _user_stopped_server
         scene = context.scene
+        _user_stopped_server = False
 
         # Create a new server instance
         if not hasattr(bpy.types, "blendermcp_server") or not bpy.types.blendermcp_server:
@@ -3337,7 +3373,9 @@ class BLENDERMCP_OT_StopServer(bpy.types.Operator):
     bl_description = "Stop the connection to Claude"
 
     def execute(self, context):
+        global _user_stopped_server
         scene = context.scene
+        _user_stopped_server = True
 
         # Stop the server if it exists
         if hasattr(bpy.types, "blendermcp_server") and bpy.types.blendermcp_server:
@@ -3503,28 +3541,21 @@ def register():
     bpy.utils.register_class(BLENDERMCP_OT_StopServer)
     bpy.utils.register_class(BLENDERMCP_OT_OpenTerms)
 
-    # Auto-start the server so the MCP client can connect without manual UI interaction
-    scene = getattr(bpy.context, 'scene', None)
-    if scene is not None:
-        port = scene.blendermcp_port
-        auto_start = scene.blendermcp_auto_start_server
-    else:
-        port = 9876
-        auto_start = True
+    if _blendermcp_on_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_blendermcp_on_load_post)
 
-    if auto_start and (not hasattr(bpy.types, "blendermcp_server") or not bpy.types.blendermcp_server):
-        bpy.types.blendermcp_server = BlenderMCPServer(port=port)
-    if auto_start and not bpy.types.blendermcp_server.running:
-        bpy.types.blendermcp_server.start()
-        try:
-            bpy.context.scene.blendermcp_server_running = bpy.types.blendermcp_server.running
-        except AttributeError:
-            pass
+    # Auto-start the server so the MCP client can connect without manual UI
+    # interaction. At Blender startup there is no scene yet, so the real work
+    # happens in the load_post handler once the .blend has been read; enabling
+    # the addon in a running Blender has a scene already and starts here.
+    _blendermcp_on_load_post()
 
     print("BlenderMCP addon registered")
 
 def unregister():
     _unregister_edit_capture_handlers()
+    with suppress(ValueError):
+        bpy.app.handlers.load_post.remove(_blendermcp_on_load_post)
 
     # Stop the server if it's running
     if hasattr(bpy.types, "blendermcp_server") and bpy.types.blendermcp_server:
