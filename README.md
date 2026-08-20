@@ -138,7 +138,7 @@ In Blender's 3D viewport, press `N` → open the **BlenderMCP** tab → click **
 | **Material control** | Apply and modify materials and colors |
 | **Scene inspection** | Get detailed information about the current Blender scene |
 | **Code execution** | Run arbitrary Python code in Blender from Claude |
-| **Asset & model generation** | Poly Haven assets, Sketchfab models, and AI-generated 3D models via Hyper3D Rodin and Hunyuan3D |
+| **Asset & model generation** | Poly Haven assets, Sketchfab models, AI-generated models via Hyper3D Rodin/Hunyuan3D, and local ComfyUI Desktop workflows |
 
 ## Components
 
@@ -422,7 +422,7 @@ Once the config file has been set on Claude, and the addon is running on Blender
 - Execute any Python code in Blender
 - Download the right models, assets and HDRIs through [Poly Haven](https://polyhaven.com/)
 - Search and download models from [Sketchfab](https://sketchfab.com/)
-- AI generated 3D models through [Hyper3D Rodin](https://hyper3d.ai/) and [Hunyuan3D](https://3d.hunyuan.tencent.com/)
+- AI generated 3D models through [Hyper3D Rodin](https://hyper3d.ai/), [Hunyuan3D](https://3d.hunyuan.tencent.com/), and user-provided [ComfyUI Desktop](https://docs.comfy.org/installation/desktop) workflows
 
 ### Example Commands
 
@@ -454,6 +454,7 @@ You can store these values there so they survive Blender restarts:
 - Hyper3D API Key
 - Hunyuan3D SecretId / SecretKey
 - Hunyuan3D API URL
+- ComfyUI API URL
 
 For headless setups or CI, credentials can also be injected by environment variables:
 
@@ -464,6 +465,20 @@ For headless setups or CI, credentials can also be injected by environment varia
 | `BLENDERMCP_HUNYUAN3D_SECRET_ID` |
 | `BLENDERMCP_HUNYUAN3D_SECRET_KEY` |
 | `BLENDERMCP_HUNYUAN3D_API_URL` |
+| `BLENDERMCP_COMFYUI_API_URL` |
+
+### ComfyUI Desktop Workflows
+
+BlenderMCP can submit a user-provided ComfyUI workflow to a running local [ComfyUI Desktop](https://docs.comfy.org/installation/desktop) instance and import supported 3D outputs into Blender.
+
+1. Start ComfyUI Desktop and install every model/custom node required by the workflow.
+2. In ComfyUI, export the workflow with **Save (API Format)**. The normal UI workflow JSON is not accepted by the execution API.
+3. Make sure the workflow exposes a 3D file through an output node such as **Save 3D Model** or **Preview 3D**. GLB is recommended because it embeds materials and textures.
+4. In Blender's **BlenderMCP** sidebar, enable **Use ComfyUI Desktop workflows**.
+5. Leave the API URL blank to use `http://127.0.0.1:8188`, or enter the URL of a trusted ComfyUI instance.
+6. Restart the BlenderMCP connection after changing the integration setting.
+
+The MCP tools can upload an optional input image, apply explicit node-input overrides, submit the API-format graph, poll its prompt history, and import GLB, GLTF, OBJ, FBX, STL, or PLY results. The workflow JSON and optional input image paths must be absolute local paths.
 
 ---
 
@@ -474,6 +489,8 @@ For headless setups or CI, credentials can also be injected by environment varia
 | **Connection issues** | Make sure the Blender addon server is running, and the MCP server is configured on Claude. **Do not** run the `uvx` command in the terminal. Sometimes the first command won't go through, but after that it starts working. |
 | **Timeout errors** | Try simplifying your requests or breaking them into smaller steps. |
 | **Poly Haven integration** | Claude is sometimes erratic with its behaviour. |
+| **ComfyUI workflow rejected** | Export with **Save (API Format)** and confirm all referenced models and custom nodes are installed in ComfyUI Desktop. |
+| **No ComfyUI 3D output found** | End the workflow with a 3D output/preview node. Prefer GLB for a self-contained Blender import. |
 | **Have you tried turning it off and on again?** | If you're still having connection errors, try restarting both Claude and the Blender server. |
 
 ## Technical Details

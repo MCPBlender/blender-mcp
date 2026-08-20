@@ -147,6 +147,8 @@ SEMANTIC_ACTIONS: dict[str, str] = {
     "import_generated_asset": "IMPORT_ASSET",
     "generate_hunyuan3d_model": "GENERATE_3D",
     "import_generated_asset_hunyuan": "IMPORT_ASSET",
+    "run_comfyui_workflow": "GENERATE_3D",
+    "import_comfyui_output": "IMPORT_ASSET",
     "get_scene_info": "OBSERVE",
     "get_object_info": "OBSERVE",
     "get_viewport_screenshot": "OBSERVE",

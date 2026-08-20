@@ -16,9 +16,12 @@ import shutil
 import zipfile
 from bpy.props import IntProperty, BoolProperty
 import io
+import mimetypes
 from datetime import datetime
 import hashlib, hmac, base64
 import os.path as osp
+from urllib.parse import quote, unquote, urlparse
+import uuid
 from collections import deque
 from contextlib import contextmanager, redirect_stdout, suppress
 from bpy.app.handlers import persistent
@@ -34,9 +37,10 @@ bl_info = {
 }
 
 # Keep in sync with blender_mcp.addon_manager.EXPECTED_ADDON_PROTOCOL_VERSION.
-ADDON_PROTOCOL_VERSION = 4
+ADDON_PROTOCOL_VERSION = 5
 
 RODIN_FREE_TRIAL_KEY = "vibecoding"
+COMFYUI_IMPORT_EXTENSIONS = {".glb", ".gltf", ".obj", ".fbx", ".stl", ".ply"}
 
 # Add User-Agent as required by Poly Haven API
 REQ_HEADERS = requests.utils.default_headers()
@@ -389,6 +393,22 @@ class BlenderMCPServer:
             "BLENDERMCP_HUNYUAN3D_API_URL",
         ) or "http://localhost:8081"
 
+    def _get_comfyui_api_url(self):
+        return self._get_config_value(
+            "blendermcp_comfyui_api_url",
+            "comfyui_api_url",
+            "BLENDERMCP_COMFYUI_API_URL",
+        ) or "http://127.0.0.1:8188"
+
+    def _validated_comfyui_base_url(self):
+        api_url = self._get_comfyui_api_url().strip().rstrip('/')
+        parsed = urlparse(api_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("ComfyUI API URL must be an absolute http:// or https:// URL")
+        if parsed.query or parsed.fragment:
+            raise ValueError("ComfyUI API URL cannot contain a query string or fragment")
+        return api_url
+
     def start(self):
         if bpy.app.background:
             print("BlenderMCP: cannot start server in background mode (blender -b) - commands would never execute\n"
@@ -636,6 +656,7 @@ class BlenderMCPServer:
             "get_hyper3d_status": self.get_hyper3d_status,
             "get_sketchfab_status": self.get_sketchfab_status,
             "get_hunyuan3d_status": self.get_hunyuan3d_status,
+            "get_comfyui_status": self.get_comfyui_status,
         }
 
         # Add Polyhaven handlers only if enabled
@@ -674,6 +695,15 @@ class BlenderMCPServer:
                 "import_generated_asset_hunyuan": self.import_generated_asset_hunyuan
             }
             handlers.update(hunyuan_handlers)
+
+        # Add ComfyUI Desktop workflow handlers only if enabled
+        if getattr(bpy.context.scene, "blendermcp_use_comfyui", False):
+            comfyui_handlers = {
+                "run_comfyui_workflow": self.run_comfyui_workflow,
+                "poll_comfyui_workflow": self.poll_comfyui_workflow,
+                "import_comfyui_output": self.import_comfyui_output,
+            }
+            handlers.update(comfyui_handlers)
 
         handler = handlers.get(cmd_type)
         if handler:
@@ -3141,6 +3171,333 @@ class BlenderMCPServer:
                 shutil.rmtree(temp_dir)
     #endregion
 
+    #region ComfyUI Desktop
+    def get_comfyui_status(self):
+        """Check whether the optional ComfyUI Desktop API is reachable."""
+        if not getattr(bpy.context.scene, "blendermcp_use_comfyui", False):
+            return {
+                "enabled": False,
+                "message": """ComfyUI Desktop integration is currently disabled. To enable it:
+                            1. Start ComfyUI Desktop
+                            2. In the BlenderMCP panel, check 'Use ComfyUI Desktop workflows'
+                            3. Confirm the API URL and restart the MCP connection""",
+            }
+
+        try:
+            base_url = self._validated_comfyui_base_url()
+            response = requests.get(f"{base_url}/system_stats", timeout=10)
+            response.raise_for_status()
+            stats = response.json()
+            if not isinstance(stats, dict):
+                raise RuntimeError(f"unexpected system stats response: {stats}")
+            return {
+                "enabled": True,
+                "api_url": base_url,
+                "system_stats": stats,
+                "message": "ComfyUI Desktop integration is enabled and ready to run API-format workflows.",
+            }
+        except Exception as e:
+            return {
+                "enabled": False,
+                "api_url": self._get_comfyui_api_url(),
+                "message": f"ComfyUI Desktop is enabled, but its API is unavailable: {e}",
+            }
+
+    @staticmethod
+    def _load_comfyui_api_workflow(workflow_path: str):
+        if not workflow_path or not os.path.isabs(workflow_path) or not os.path.isfile(workflow_path):
+            raise ValueError(f"Workflow file not found: {workflow_path}")
+        with open(workflow_path, "r", encoding="utf-8") as workflow_file:
+            payload = json.load(workflow_file)
+
+        workflow = payload.get("prompt") if isinstance(payload, dict) and "prompt" in payload else payload
+        if not isinstance(workflow, dict) or not workflow:
+            raise ValueError("Workflow must be a non-empty ComfyUI API-format JSON object")
+        if "nodes" in workflow and isinstance(workflow.get("nodes"), list):
+            raise ValueError("Workflow is in UI format; export it with 'Save (API Format)' in ComfyUI")
+        for node_id, node in workflow.items():
+            if not isinstance(node_id, str) or not isinstance(node, dict):
+                raise ValueError("Workflow contains an invalid node entry")
+            if not isinstance(node.get("class_type"), str) or not isinstance(node.get("inputs"), dict):
+                raise ValueError(f"Workflow node {node_id} is not in ComfyUI API format")
+        return workflow
+
+    @staticmethod
+    def _apply_comfyui_input_overrides(workflow: dict, input_overrides: dict = None):
+        if input_overrides is None:
+            return
+        if not isinstance(input_overrides, dict):
+            raise ValueError("input_overrides must be an object keyed by node id")
+        for node_id, overrides in input_overrides.items():
+            node_id = str(node_id)
+            if node_id not in workflow:
+                raise ValueError(f"Unknown workflow node id: {node_id}")
+            if not isinstance(overrides, dict):
+                raise ValueError(f"Overrides for node {node_id} must be an object")
+            node_inputs = workflow[node_id]["inputs"]
+            for input_name, value in overrides.items():
+                if input_name not in node_inputs:
+                    raise ValueError(f"Unknown input '{input_name}' on workflow node {node_id}")
+                node_inputs[input_name] = value
+
+    @staticmethod
+    def _comfyui_response_error(response, action: str):
+        if response.status_code < 400:
+            return None
+        detail = getattr(response, "text", "") or repr(response)
+        return f"ComfyUI {action} failed with status {response.status_code}: {detail[:1000]}"
+
+    def _upload_comfyui_input_image(self, base_url: str, image_path: str):
+        if not image_path or not os.path.isabs(image_path) or not os.path.isfile(image_path):
+            raise ValueError(f"Input image file not found: {image_path}")
+        mime_type = mimetypes.guess_type(image_path)[0] or "application/octet-stream"
+        with open(image_path, "rb") as image_file:
+            response = requests.post(
+                f"{base_url}/upload/image",
+                files={"image": (os.path.basename(image_path), image_file, mime_type)},
+                data={"type": "input", "overwrite": "false"},
+                timeout=60,
+            )
+        error = self._comfyui_response_error(response, "image upload")
+        if error:
+            raise RuntimeError(error)
+        result = response.json()
+        if not isinstance(result, dict) or not result.get("name"):
+            raise RuntimeError(f"ComfyUI returned an invalid upload response: {result}")
+        subfolder = str(result.get("subfolder") or "").strip('/')
+        return f"{subfolder}/{result['name']}" if subfolder else result["name"]
+
+    def run_comfyui_workflow(
+        self,
+        workflow_path: str,
+        input_overrides: dict = None,
+        input_image_path: str = None,
+        input_image_node_id: str = None,
+        input_image_field: str = "image",
+    ):
+        """Submit a ComfyUI API-format workflow, optionally uploading one input image."""
+        try:
+            workflow = self._load_comfyui_api_workflow(workflow_path)
+            self._apply_comfyui_input_overrides(workflow, input_overrides)
+            base_url = self._validated_comfyui_base_url()
+
+            uploaded_image = None
+            if input_image_path or input_image_node_id:
+                if not input_image_path or not input_image_node_id:
+                    return {"error": "input_image_path and input_image_node_id must be provided together"}
+                node_id = str(input_image_node_id)
+                if node_id not in workflow:
+                    return {"error": f"Unknown input image node id: {node_id}"}
+                if input_image_field not in workflow[node_id]["inputs"]:
+                    return {"error": f"Unknown input '{input_image_field}' on workflow node {node_id}"}
+                uploaded_image = self._upload_comfyui_input_image(base_url, input_image_path)
+                workflow[node_id]["inputs"][input_image_field] = uploaded_image
+
+            client_id = str(uuid.uuid4())
+            response = requests.post(
+                f"{base_url}/prompt",
+                json={"prompt": workflow, "client_id": client_id},
+                timeout=60,
+            )
+            error = self._comfyui_response_error(response, "workflow submission")
+            if error:
+                return {"error": error}
+            result = response.json()
+            prompt_id = result.get("prompt_id") if isinstance(result, dict) else None
+            if not prompt_id:
+                return {"error": f"ComfyUI did not return a prompt_id: {result}"}
+            return {
+                "prompt_id": prompt_id,
+                "queue_number": result.get("number"),
+                "node_errors": result.get("node_errors", {}),
+                "uploaded_image": uploaded_image,
+                "status": "queued",
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    @staticmethod
+    def _find_comfyui_3d_outputs(outputs: dict):
+        found = []
+
+        def visit(value, node_id, output_name):
+            if isinstance(value, dict):
+                filename = value.get("filename")
+                if isinstance(filename, str) and osp.splitext(filename)[1].lower() in COMFYUI_IMPORT_EXTENSIONS:
+                    found.append({
+                        "node_id": str(node_id),
+                        "output_name": str(output_name),
+                        "filename": filename,
+                        "subfolder": str(value.get("subfolder") or ""),
+                        "type": str(value.get("type") or "output"),
+                    })
+                    return
+                for nested_name, nested_value in value.items():
+                    visit(nested_value, node_id, nested_name)
+            elif isinstance(value, list):
+                for item in value:
+                    visit(item, node_id, output_name)
+            elif isinstance(value, str) and osp.splitext(value)[1].lower() in COMFYUI_IMPORT_EXTENSIONS:
+                path_parts = value.split('/')
+                found.append({
+                    "node_id": str(node_id),
+                    "output_name": str(output_name),
+                    "filename": path_parts[-1],
+                    "subfolder": '/'.join(path_parts[:-1]),
+                    "type": "output",
+                })
+
+        if isinstance(outputs, dict):
+            for node_id, node_output in outputs.items():
+                visit(node_output, node_id, "result")
+        return found
+
+    @staticmethod
+    def _comfyui_execution_error(status: dict):
+        messages = status.get("messages", []) if isinstance(status, dict) else []
+        for message in reversed(messages):
+            if isinstance(message, (list, tuple)) and len(message) == 2 and message[0] == "execution_error":
+                detail = message[1] if isinstance(message[1], dict) else {}
+                return {
+                    "node_id": detail.get("node_id"),
+                    "node_type": detail.get("node_type"),
+                    "message": detail.get("exception_message") or "ComfyUI workflow execution failed",
+                }
+        return None
+
+    def poll_comfyui_workflow(self, prompt_id: str):
+        """Poll ComfyUI history, falling back to the current queue while work is pending."""
+        try:
+            if not prompt_id:
+                return {"error": "prompt_id is required"}
+            base_url = self._validated_comfyui_base_url()
+            encoded_id = quote(str(prompt_id), safe='')
+            history_response = requests.get(f"{base_url}/history/{encoded_id}", timeout=15)
+            history_response.raise_for_status()
+            history = history_response.json()
+            entry = history.get(str(prompt_id)) if isinstance(history, dict) else None
+            if isinstance(entry, dict):
+                status = entry.get("status") or {}
+                status_str = status.get("status_str")
+                outputs = self._find_comfyui_3d_outputs(entry.get("outputs") or {})
+                if status_str == "success" and status.get("completed"):
+                    return {"prompt_id": prompt_id, "status": "done", "outputs": outputs}
+                error = self._comfyui_execution_error(status)
+                if error:
+                    return {"prompt_id": prompt_id, "status": "error", "error": error, "outputs": outputs}
+                messages = status.get("messages", []) if isinstance(status, dict) else []
+                if any(
+                    isinstance(message, (list, tuple)) and message and message[0] == "execution_interrupted"
+                    for message in messages
+                ):
+                    return {"prompt_id": prompt_id, "status": "cancelled", "outputs": outputs}
+                return {"prompt_id": prompt_id, "status": status_str or "unknown", "outputs": outputs}
+
+            queue_response = requests.get(f"{base_url}/queue", timeout=10)
+            queue_response.raise_for_status()
+            queue = queue_response.json()
+
+            def contains(items):
+                return any(isinstance(item, (list, tuple)) and len(item) > 1 and str(item[1]) == str(prompt_id) for item in (items or []))
+
+            if isinstance(queue, dict) and contains(queue.get("queue_running")):
+                state = "running"
+            elif isinstance(queue, dict) and contains(queue.get("queue_pending")):
+                state = "queued"
+            else:
+                state = "unknown"
+            return {"prompt_id": prompt_id, "status": state, "outputs": []}
+        except Exception as e:
+            return {"error": str(e)}
+
+    @staticmethod
+    def _validate_comfyui_output_reference(filename: str, subfolder: str, folder_type: str):
+        if folder_type not in {"input", "output", "temp"}:
+            raise ValueError("ComfyUI output type must be input, output, or temp")
+        if not isinstance(filename, str) or not filename.strip():
+            raise ValueError("filename is required")
+        filename = unquote(filename.strip())
+        subfolder = unquote(str(subfolder or "").strip())
+        if '/' in filename or '\\' in filename or ':' in filename or filename in {'.', '..'} or '\x00' in filename:
+            raise ValueError("Invalid ComfyUI output filename")
+        if subfolder.startswith(('/', '\\')):
+            raise ValueError("Invalid ComfyUI output subfolder")
+        subfolder = subfolder.rstrip('/')
+        parts = subfolder.split('/') if subfolder else []
+        if '\\' in subfolder or any(part in {'', '.', '..'} or ':' in part for part in parts):
+            raise ValueError("Invalid ComfyUI output subfolder")
+        extension = osp.splitext(filename)[1].lower()
+        if extension not in COMFYUI_IMPORT_EXTENSIONS:
+            raise ValueError(f"Unsupported ComfyUI 3D output format: {extension or 'none'}")
+        return filename, subfolder, folder_type, extension
+
+    def import_comfyui_output(self, name: str, filename: str, subfolder: str = "", folder_type: str = "output"):
+        """Download one 3D output through ComfyUI's /view endpoint and import it."""
+        temp_dir = None
+        try:
+            filename, subfolder, folder_type, extension = self._validate_comfyui_output_reference(
+                filename, subfolder, folder_type
+            )
+            base_url = self._validated_comfyui_base_url()
+            temp_dir = tempfile.mkdtemp(prefix="comfyui_3d_")
+            model_path = osp.join(temp_dir, f"model{extension}")
+            response = requests.get(
+                f"{base_url}/view",
+                params={"filename": filename, "subfolder": subfolder, "type": folder_type},
+                stream=True,
+                timeout=180,
+            )
+            response.raise_for_status()
+            with open(model_path, "wb") as model_file:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        model_file.write(chunk)
+
+            if extension in {".glb", ".gltf"}:
+                bpy.ops.import_scene.gltf(filepath=model_path)
+            elif extension == ".obj":
+                if bpy.app.version >= (4, 0, 0):
+                    bpy.ops.wm.obj_import(filepath=model_path)
+                else:
+                    bpy.ops.import_scene.obj(filepath=model_path)
+            elif extension == ".fbx":
+                bpy.ops.import_scene.fbx(filepath=model_path)
+            elif extension == ".stl":
+                if bpy.app.version >= (4, 0, 0):
+                    bpy.ops.wm.stl_import(filepath=model_path)
+                else:
+                    bpy.ops.import_mesh.stl(filepath=model_path)
+            elif extension == ".ply":
+                if bpy.app.version >= (4, 0, 0):
+                    bpy.ops.wm.ply_import(filepath=model_path)
+                else:
+                    bpy.ops.import_mesh.ply(filepath=model_path)
+
+            imported_objects = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
+            if not imported_objects:
+                return {"success": False, "error": "No mesh objects imported from ComfyUI output"}
+            if name:
+                imported_objects[0].name = name
+            primary = imported_objects[0]
+            result = {
+                "success": True,
+                "name": primary.name,
+                "imported_objects": [obj.name for obj in imported_objects],
+                "location": [primary.location.x, primary.location.y, primary.location.z],
+                "rotation": [primary.rotation_euler.x, primary.rotation_euler.y, primary.rotation_euler.z],
+                "scale": [primary.scale.x, primary.scale.y, primary.scale.z],
+                "source": {"filename": filename, "subfolder": subfolder, "type": folder_type},
+            }
+            result["world_bounding_box"] = self._get_aabb(primary)
+            return result
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+        finally:
+            if temp_dir:
+                with suppress(Exception):
+                    shutil.rmtree(temp_dir)
+    #endregion
+
 # Blender Addon Preferences
 class BLENDERMCP_AddonPreferences(bpy.types.AddonPreferences):
     bl_idname = __name__
@@ -3185,6 +3542,11 @@ class BLENDERMCP_AddonPreferences(bpy.types.AddonPreferences):
         description="Persistent Hunyuan3D API URL",
         default=""
     )
+    comfyui_api_url: bpy.props.StringProperty(
+        name="ComfyUI API URL",
+        description="Persistent URL for the ComfyUI Desktop API",
+        default=""
+    )
 
     def draw(self, context):
         layout = self.layout
@@ -3220,6 +3582,7 @@ class BLENDERMCP_AddonPreferences(bpy.types.AddonPreferences):
         cred_box.prop(self, "hunyuan3d_secret_id", text="Hunyuan3D SecretId")
         cred_box.prop(self, "hunyuan3d_secret_key", text="Hunyuan3D SecretKey")
         cred_box.prop(self, "hunyuan3d_api_url", text="Hunyuan3D API URL")
+        cred_box.prop(self, "comfyui_api_url", text="ComfyUI API URL")
 
 # Blender UI Panel
 class BLENDERMCP_PT_Panel(bpy.types.Panel):
@@ -3272,6 +3635,13 @@ class BLENDERMCP_PT_Panel(bpy.types.Panel):
                 layout.prop(scene, "blendermcp_hunyuan3d_num_inference_steps", text="Number of Inference Steps")
                 layout.prop(scene, "blendermcp_hunyuan3d_guidance_scale", text="Guidance Scale")
                 layout.prop(scene, "blendermcp_hunyuan3d_texture", text="Generate Texture")
+
+        layout.prop(scene, "blendermcp_use_comfyui", text="Use ComfyUI Desktop workflows")
+        if scene.blendermcp_use_comfyui:
+            if prefs:
+                layout.prop(prefs, "comfyui_api_url", text="API URL")
+            else:
+                layout.prop(scene, "blendermcp_comfyui_api_url", text="API URL")
         
         if not scene.blendermcp_server_running:
             layout.operator("blendermcp.start_server", text="Connect to MCP server")
@@ -3480,6 +3850,18 @@ def register():
         description="Whether to generate texture for the 3D model",
         default=False,
     )
+
+    bpy.types.Scene.blendermcp_use_comfyui = bpy.props.BoolProperty(
+        name="Use ComfyUI Desktop",
+        description="Enable local ComfyUI Desktop workflow execution",
+        default=False,
+    )
+
+    bpy.types.Scene.blendermcp_comfyui_api_url = bpy.props.StringProperty(
+        name="ComfyUI API URL",
+        description="URL of ComfyUI Desktop (blank uses http://127.0.0.1:8188)",
+        default="",
+    )
     
     bpy.types.Scene.blendermcp_use_sketchfab = bpy.props.BoolProperty(
         name="Use Sketchfab",
@@ -3556,6 +3938,8 @@ def unregister():
     del bpy.types.Scene.blendermcp_hunyuan3d_num_inference_steps
     del bpy.types.Scene.blendermcp_hunyuan3d_guidance_scale
     del bpy.types.Scene.blendermcp_hunyuan3d_texture
+    del bpy.types.Scene.blendermcp_use_comfyui
+    del bpy.types.Scene.blendermcp_comfyui_api_url
 
     print("BlenderMCP addon unregistered")
 

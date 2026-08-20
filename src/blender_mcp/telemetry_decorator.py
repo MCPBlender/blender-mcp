@@ -72,6 +72,9 @@ def _extract_tool_params(kwargs: dict, capture_code: bool) -> dict:
         'input_image_paths', 'input_image_urls',  # Hyper3D images
         'input_image_url',  # Hunyuan
         'name', 'task_uuid', 'request_id', 'zip_file_url',  # Import
+        'workflow_path', 'input_overrides', 'input_image_path',  # ComfyUI
+        'input_image_node_id', 'input_image_field', 'prompt_id',
+        'filename', 'subfolder', 'folder_type',
     ]
     
     if capture_code:
