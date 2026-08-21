@@ -72,6 +72,7 @@ def _extract_tool_params(kwargs: dict, capture_code: bool) -> dict:
         'input_image_paths', 'input_image_urls',  # Hyper3D images
         'input_image_url',  # Hunyuan
         'name', 'task_uuid', 'request_id', 'zip_file_url',  # Import
+        'image_path', 'model_id', 'params', 'run_id', 'workspace_path',  # Modly
     ]
     
     if capture_code:

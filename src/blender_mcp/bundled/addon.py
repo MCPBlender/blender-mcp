@@ -16,9 +16,11 @@ import shutil
 import zipfile
 from bpy.props import IntProperty, BoolProperty
 import io
+import mimetypes
 from datetime import datetime
 import hashlib, hmac, base64
 import os.path as osp
+from urllib.parse import quote, unquote, urlparse
 from collections import deque
 from contextlib import contextmanager, redirect_stdout, suppress
 from bpy.app.handlers import persistent
@@ -34,7 +36,7 @@ bl_info = {
 }
 
 # Keep in sync with blender_mcp.addon_manager.EXPECTED_ADDON_PROTOCOL_VERSION.
-ADDON_PROTOCOL_VERSION = 4
+ADDON_PROTOCOL_VERSION = 5
 
 RODIN_FREE_TRIAL_KEY = "vibecoding"
 
@@ -389,6 +391,22 @@ class BlenderMCPServer:
             "BLENDERMCP_HUNYUAN3D_API_URL",
         ) or "http://localhost:8081"
 
+    def _get_modly_api_url(self):
+        return self._get_config_value(
+            "blendermcp_modly_api_url",
+            "modly_api_url",
+            "BLENDERMCP_MODLY_API_URL",
+        ) or "http://127.0.0.1:8765"
+
+    def _validated_modly_base_url(self):
+        api_url = self._get_modly_api_url().strip().rstrip('/')
+        parsed = urlparse(api_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("Modly API URL must be an absolute http:// or https:// URL")
+        if parsed.query or parsed.fragment:
+            raise ValueError("Modly API URL cannot contain a query string or fragment")
+        return api_url
+
     def start(self):
         if bpy.app.background:
             print("BlenderMCP: cannot start server in background mode (blender -b) - commands would never execute\n"
@@ -636,6 +654,7 @@ class BlenderMCPServer:
             "get_hyper3d_status": self.get_hyper3d_status,
             "get_sketchfab_status": self.get_sketchfab_status,
             "get_hunyuan3d_status": self.get_hunyuan3d_status,
+            "get_modly_status": self.get_modly_status,
         }
 
         # Add Polyhaven handlers only if enabled
@@ -674,6 +693,16 @@ class BlenderMCPServer:
                 "import_generated_asset_hunyuan": self.import_generated_asset_hunyuan
             }
             handlers.update(hunyuan_handlers)
+
+        # Add Modly handlers only if enabled
+        if getattr(bpy.context.scene, "blendermcp_use_modly", False):
+            modly_handlers = {
+                "list_modly_models": self.list_modly_models,
+                "create_modly_job": self.create_modly_job,
+                "poll_modly_job_status": self.poll_modly_job_status,
+                "import_generated_asset_modly": self.import_generated_asset_modly,
+            }
+            handlers.update(modly_handlers)
 
         handler = handlers.get(cmd_type)
         if handler:
@@ -3141,6 +3170,189 @@ class BlenderMCPServer:
                 shutil.rmtree(temp_dir)
     #endregion
 
+    #region Modly
+    def get_modly_status(self):
+        """Check whether the optional local Modly integration is reachable."""
+        if not getattr(bpy.context.scene, "blendermcp_use_modly", False):
+            return {
+                "enabled": False,
+                "message": """Modly integration is currently disabled. To enable it:
+                            1. Start the Modly desktop app
+                            2. In the BlenderMCP panel, check 'Use Modly local 3D model generation'
+                            3. Confirm the Modly API URL and restart the MCP connection""",
+            }
+
+        try:
+            base_url = self._validated_modly_base_url()
+            health_response = requests.get(f"{base_url}/health", timeout=5)
+            health_response.raise_for_status()
+            health = health_response.json()
+            if not isinstance(health, dict) or health.get("status") != "ok":
+                raise RuntimeError(f"unexpected health response: {health}")
+
+            model_response = requests.get(f"{base_url}/model/status", timeout=10)
+            model_response.raise_for_status()
+            active_model = model_response.json()
+            if not isinstance(active_model, dict) or not active_model.get("id"):
+                raise RuntimeError(f"invalid active model response: {active_model}")
+            if not active_model.get("downloaded"):
+                return {
+                    "enabled": False,
+                    "api_url": base_url,
+                    "health": health,
+                    "active_model": active_model,
+                    "message": "Modly is running, but its active model is not downloaded yet.",
+                }
+
+            return {
+                "enabled": True,
+                "api_url": base_url,
+                "health": health,
+                "active_model": active_model,
+                "message": f"Modly integration is ready. Active model: {active_model['id']}.",
+            }
+        except Exception as e:
+            return {
+                "enabled": False,
+                "api_url": self._get_modly_api_url(),
+                "message": f"Modly integration is enabled, but the API is unavailable: {e}",
+            }
+
+    def list_modly_models(self):
+        """List generation models reported by Modly."""
+        try:
+            base_url = self._validated_modly_base_url()
+            response = requests.get(f"{base_url}/model/all", timeout=10)
+            response.raise_for_status()
+            models = response.json()
+            if not isinstance(models, list):
+                return {"error": "Modly returned an invalid model list"}
+            return {"models": models}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def create_modly_job(self, image_path: str, model_id: str = None, params: dict = None):
+        """Start an image-to-3D workflow through Modly's canonical API."""
+        try:
+            if not image_path or not os.path.isabs(image_path) or not os.path.isfile(image_path):
+                return {"error": f"Image file not found: {image_path}"}
+            if params is not None and not isinstance(params, dict):
+                return {"error": "params must be a JSON object"}
+
+            base_url = self._validated_modly_base_url()
+            if not model_id:
+                model_response = requests.get(f"{base_url}/model/status", timeout=10)
+                model_response.raise_for_status()
+                active_model = model_response.json()
+                model_id = active_model.get("id") if isinstance(active_model, dict) else None
+                if not model_id:
+                    return {"error": "Modly did not report an active model id"}
+
+            mime_type = mimetypes.guess_type(image_path)[0] or "application/octet-stream"
+            form_data = {
+                "model_id": model_id,
+                "params": json.dumps(params or {}, separators=(',', ':')),
+            }
+            with open(image_path, "rb") as image_file:
+                response = requests.post(
+                    f"{base_url}/workflow-runs/from-image",
+                    files={"image": (os.path.basename(image_path), image_file, mime_type)},
+                    data=form_data,
+                    timeout=60,
+                )
+            response.raise_for_status()
+            result = response.json()
+            run_id = result.get("run_id") if isinstance(result, dict) else None
+            if not run_id:
+                return {"error": f"Modly did not return a run_id: {result}"}
+            return {
+                "run_id": run_id,
+                "status": result.get("status", "pending"),
+                "model_id": model_id,
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def poll_modly_job_status(self, run_id: str):
+        """Poll a canonical Modly workflow run."""
+        try:
+            if not run_id:
+                return {"error": "run_id is required"}
+            base_url = self._validated_modly_base_url()
+            response = requests.get(
+                f"{base_url}/workflow-runs/{quote(str(run_id), safe='')}",
+                timeout=10,
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            return {"error": str(e)}
+
+    @staticmethod
+    def _validate_modly_workspace_path(workspace_path: str):
+        """Validate an opaque workspace-relative path before asking Modly to export it."""
+        if not isinstance(workspace_path, str) or not workspace_path.strip():
+            raise ValueError("workspace_path is required")
+
+        value = workspace_path.strip()
+        if value.startswith("/workspace/"):
+            value = value[len("/workspace/"):]
+        decoded = unquote(value)
+        if not decoded or decoded.startswith(('/', '\\')) or '\\' in decoded or '\x00' in decoded:
+            raise ValueError("Invalid Modly workspace path")
+        parts = decoded.split('/')
+        if any(part in {'', '.', '..'} or ':' in part for part in parts):
+            raise ValueError("Invalid Modly workspace path")
+        return decoded
+
+    def import_generated_asset_modly(self, name: str, workspace_path: str):
+        """Export a completed Modly workspace mesh as GLB and import it into Blender."""
+        temp_dir = None
+        try:
+            safe_path = self._validate_modly_workspace_path(workspace_path)
+            base_url = self._validated_modly_base_url()
+            temp_dir = tempfile.mkdtemp(prefix="modly_glb_")
+            glb_path = osp.join(temp_dir, "model.glb")
+
+            response = requests.get(
+                f"{base_url}/export/glb",
+                params={"path": safe_path},
+                stream=True,
+                timeout=180,
+            )
+            response.raise_for_status()
+            with open(glb_path, "wb") as glb_file:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        glb_file.write(chunk)
+
+            bpy.ops.import_scene.gltf(filepath=glb_path)
+            imported_objects = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
+            if not imported_objects:
+                return {"success": False, "error": "No mesh objects imported from Modly GLB"}
+
+            if name:
+                imported_objects[0].name = name
+            primary = imported_objects[0]
+            result = {
+                "success": True,
+                "name": primary.name,
+                "imported_objects": [obj.name for obj in imported_objects],
+                "location": [primary.location.x, primary.location.y, primary.location.z],
+                "rotation": [primary.rotation_euler.x, primary.rotation_euler.y, primary.rotation_euler.z],
+                "scale": [primary.scale.x, primary.scale.y, primary.scale.z],
+                "workspace_path": safe_path,
+            }
+            result["world_bounding_box"] = self._get_aabb(primary)
+            return result
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+        finally:
+            if temp_dir:
+                with suppress(Exception):
+                    shutil.rmtree(temp_dir)
+    #endregion
+
 # Blender Addon Preferences
 class BLENDERMCP_AddonPreferences(bpy.types.AddonPreferences):
     bl_idname = __name__
@@ -3185,6 +3397,11 @@ class BLENDERMCP_AddonPreferences(bpy.types.AddonPreferences):
         description="Persistent Hunyuan3D API URL",
         default=""
     )
+    modly_api_url: bpy.props.StringProperty(
+        name="Modly API URL",
+        description="Persistent URL for the local Modly desktop API",
+        default=""
+    )
 
     def draw(self, context):
         layout = self.layout
@@ -3220,6 +3437,7 @@ class BLENDERMCP_AddonPreferences(bpy.types.AddonPreferences):
         cred_box.prop(self, "hunyuan3d_secret_id", text="Hunyuan3D SecretId")
         cred_box.prop(self, "hunyuan3d_secret_key", text="Hunyuan3D SecretKey")
         cred_box.prop(self, "hunyuan3d_api_url", text="Hunyuan3D API URL")
+        cred_box.prop(self, "modly_api_url", text="Modly API URL")
 
 # Blender UI Panel
 class BLENDERMCP_PT_Panel(bpy.types.Panel):
@@ -3272,6 +3490,13 @@ class BLENDERMCP_PT_Panel(bpy.types.Panel):
                 layout.prop(scene, "blendermcp_hunyuan3d_num_inference_steps", text="Number of Inference Steps")
                 layout.prop(scene, "blendermcp_hunyuan3d_guidance_scale", text="Guidance Scale")
                 layout.prop(scene, "blendermcp_hunyuan3d_texture", text="Generate Texture")
+
+        layout.prop(scene, "blendermcp_use_modly", text="Use Modly local 3D model generation")
+        if scene.blendermcp_use_modly:
+            if prefs:
+                layout.prop(prefs, "modly_api_url", text="API URL")
+            else:
+                layout.prop(scene, "blendermcp_modly_api_url", text="API URL")
         
         if not scene.blendermcp_server_running:
             layout.operator("blendermcp.start_server", text="Connect to MCP server")
@@ -3480,6 +3705,18 @@ def register():
         description="Whether to generate texture for the 3D model",
         default=False,
     )
+
+    bpy.types.Scene.blendermcp_use_modly = bpy.props.BoolProperty(
+        name="Use Modly",
+        description="Enable local Modly image-to-3D generation",
+        default=False,
+    )
+
+    bpy.types.Scene.blendermcp_modly_api_url = bpy.props.StringProperty(
+        name="Modly API URL",
+        description="URL of the local Modly desktop API (blank uses http://127.0.0.1:8765)",
+        default="",
+    )
     
     bpy.types.Scene.blendermcp_use_sketchfab = bpy.props.BoolProperty(
         name="Use Sketchfab",
@@ -3556,6 +3793,8 @@ def unregister():
     del bpy.types.Scene.blendermcp_hunyuan3d_num_inference_steps
     del bpy.types.Scene.blendermcp_hunyuan3d_guidance_scale
     del bpy.types.Scene.blendermcp_hunyuan3d_texture
+    del bpy.types.Scene.blendermcp_use_modly
+    del bpy.types.Scene.blendermcp_modly_api_url
 
     print("BlenderMCP addon unregistered")
 

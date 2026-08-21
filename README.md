@@ -138,7 +138,7 @@ In Blender's 3D viewport, press `N` → open the **BlenderMCP** tab → click **
 | **Material control** | Apply and modify materials and colors |
 | **Scene inspection** | Get detailed information about the current Blender scene |
 | **Code execution** | Run arbitrary Python code in Blender from Claude |
-| **Asset & model generation** | Poly Haven assets, Sketchfab models, and AI-generated 3D models via Hyper3D Rodin and Hunyuan3D |
+| **Asset & model generation** | Poly Haven assets, Sketchfab models, and AI-generated 3D models via Hyper3D Rodin, Hunyuan3D, and local Modly workflows |
 
 ## Components
 
@@ -422,7 +422,7 @@ Once the config file has been set on Claude, and the addon is running on Blender
 - Execute any Python code in Blender
 - Download the right models, assets and HDRIs through [Poly Haven](https://polyhaven.com/)
 - Search and download models from [Sketchfab](https://sketchfab.com/)
-- AI generated 3D models through [Hyper3D Rodin](https://hyper3d.ai/) and [Hunyuan3D](https://3d.hunyuan.tencent.com/)
+- AI generated 3D models through [Hyper3D Rodin](https://hyper3d.ai/), [Hunyuan3D](https://3d.hunyuan.tencent.com/), and the local, open-source [Modly](https://modly3d.app/)
 
 ### Example Commands
 
@@ -454,6 +454,7 @@ You can store these values there so they survive Blender restarts:
 - Hyper3D API Key
 - Hunyuan3D SecretId / SecretKey
 - Hunyuan3D API URL
+- Modly API URL
 
 For headless setups or CI, credentials can also be injected by environment variables:
 
@@ -464,6 +465,18 @@ For headless setups or CI, credentials can also be injected by environment varia
 | `BLENDERMCP_HUNYUAN3D_SECRET_ID` |
 | `BLENDERMCP_HUNYUAN3D_SECRET_KEY` |
 | `BLENDERMCP_HUNYUAN3D_API_URL` |
+| `BLENDERMCP_MODLY_API_URL` |
+
+### Local Modly Integration
+
+[Modly](https://modly3d.app/docs) runs image-to-3D generation locally, without an API key or cloud credits. To use it with BlenderMCP:
+
+1. Install and start the Modly desktop app, then download at least one generation model in Modly.
+2. In Blender's **BlenderMCP** sidebar, enable **Use Modly local 3D model generation**.
+3. Leave the API URL blank to use `http://127.0.0.1:8765`, or enter the URL of a trusted Modly instance on your network.
+4. Restart the BlenderMCP connection after changing the integration setting.
+
+The MCP tools can list downloaded models, start a canonical Modly workflow from an absolute local image path, poll its status, and export/import the completed mesh as GLB. Modly must remain running while those tools are used.
 
 ---
 
@@ -474,6 +487,7 @@ For headless setups or CI, credentials can also be injected by environment varia
 | **Connection issues** | Make sure the Blender addon server is running, and the MCP server is configured on Claude. **Do not** run the `uvx` command in the terminal. Sometimes the first command won't go through, but after that it starts working. |
 | **Timeout errors** | Try simplifying your requests or breaking them into smaller steps. |
 | **Poly Haven integration** | Claude is sometimes erratic with its behaviour. |
+| **Modly is unavailable** | Start the Modly desktop app, confirm its API responds at the configured URL, and make sure a generation model has been downloaded in Modly. |
 | **Have you tried turning it off and on again?** | If you're still having connection errors, try restarting both Claude and the Blender server. |
 
 ## Technical Details
